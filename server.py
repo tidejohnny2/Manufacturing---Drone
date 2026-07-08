@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -84,7 +85,10 @@ def fetch_route_steps(cur, facility_id: int = 1) -> list[dict]:
     cur.execute(
         """
         SELECT ps.step_number, ps.source_zone_id, source.name AS source_zone_name,
-               ps.target_zone_id, target.name AS target_zone_name, ps.expected_minutes
+               source.capacity AS source_capacity,
+               ps.target_zone_id, target.name AS target_zone_name,
+               target.capacity AS target_capacity,
+               ps.expected_minutes
         FROM process_steps ps
         JOIN zones source ON source.id = ps.source_zone_id
         JOIN zones target ON target.id = ps.target_zone_id
@@ -192,16 +196,19 @@ def fetch_active_orders(cur) -> list[dict]:
     return cur.fetchall()
 
 
-def build_zone_model(route_steps: list[dict]) -> tuple[list[str], dict, dict, dict]:
+def build_zone_model(route_steps: list[dict]) -> tuple[list[str], dict, dict, dict, dict]:
     entry_zone_id = route_steps[0]["source_zone_id"]
     zone_order = [entry_zone_id] + [step["target_zone_id"] for step in route_steps]
     zone_names = {entry_zone_id: route_steps[0]["source_zone_name"]}
+    capacities = {entry_zone_id: route_steps[0]["source_capacity"]}
     durations = {}
     standard_durations = {}
 
     for step in route_steps:
         zone_names[step["source_zone_id"]] = step["source_zone_name"]
         zone_names[step["target_zone_id"]] = step["target_zone_name"]
+        capacities[step["source_zone_id"]] = step["source_capacity"]
+        capacities[step["target_zone_id"]] = step["target_capacity"]
         standard_durations[step["source_zone_id"]] = step["expected_minutes"]
 
     simulation_factor = simulation_factor_for(sum(standard_durations.values()))
@@ -210,14 +217,16 @@ def build_zone_model(route_steps: list[dict]) -> tuple[list[str], dict, dict, di
         for zone_id, expected_minutes in standard_durations.items()
     }
 
-    return zone_order, zone_names, durations, standard_durations
+    return zone_order, zone_names, durations, standard_durations, capacities
 
 
 def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> list[dict]:
-    zone_order, zone_names, durations, standard_durations = build_zone_model(route_steps)
-    total_minutes = sum(durations.values())
-    recorded_minutes = sum(standard_durations.values())
-    simulation_factor = total_minutes / recorded_minutes if recorded_minutes else read_simulation_factor()
+    zone_order, zone_names, durations, standard_durations, capacities = build_zone_model(route_steps)
+    single_pass_minutes = sum(durations.values())
+    single_pass_recorded = sum(standard_durations.values())
+    simulation_factor = (
+        single_pass_minutes / single_pass_recorded if single_pass_recorded else read_simulation_factor()
+    )
     station_available = {
         zone_id: datetime.min.replace(tzinfo=timezone.utc)
         for zone_id in zone_order[:-1]
@@ -229,9 +238,15 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
         arrival_time = order["created_at"]
         schedule = []
         previous_end = arrival_time
+        recorded_minutes = 0
 
         for zone_id in zone_order[:-1]:
-            duration = durations.get(zone_id, 0)
+            # Batch capacity: a station works on at most `capacity` units at a
+            # time, so an order larger than capacity multiplies the cycle time.
+            capacity = capacities.get(zone_id)
+            batches = math.ceil(order["quantity"] / capacity) if capacity else 1
+            duration = durations.get(zone_id, 0) * batches
+            recorded_minutes += standard_durations.get(zone_id, 0) * batches
             start_time = max(previous_end, station_available[zone_id])
             end_time = start_time + timedelta(minutes=duration)
             schedule.append(
@@ -245,6 +260,7 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
             station_available[zone_id] = end_time
             previous_end = end_time
 
+        total_minutes = sum(segment["duration"] for segment in schedule)
         elapsed_minutes = max(0, (now - arrival_time).total_seconds() / 60)
         assigned_index = None
         completed_zone_ids = set()
@@ -312,6 +328,7 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
                     "sequence_number": sequence_number,
                     "zone_id": zone_id,
                     "station": zone_names.get(zone_id, zone_id),
+                    "capacity": capacities.get(zone_id),
                     "wip_quantity": order["quantity"] if is_current else 0,
                     "completed_quantity": order["quantity"] if is_done else 0,
                     "hold_quantity": 0,
@@ -773,11 +790,24 @@ def fetch_next_order_no(finished_sku: str = DEFAULT_FINISHED_SKU) -> str:
 def fetch_floor_dashboard(facility_id: int = 1) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, zone_type, capacity FROM zones WHERE facility_id = %s",
+                (facility_id,),
+            )
+            capacities = {
+                row["id"]: {"capacity": row["capacity"], "zone_type": row["zone_type"]}
+                for row in cur.fetchall()
+            }
+
             # Simulate every facility so case-line orders keep completing and
             # posting inventory even when only the drone floor map is open.
             all_states = simulate_active_states(cur)
             if not all_states:
-                return {"summary": {"active_orders": 0, "active_quantity": 0}, "zones": []}
+                return {
+                    "summary": {"active_orders": 0, "active_quantity": 0},
+                    "zones": [],
+                    "capacities": capacities,
+                }
 
             for state in all_states:
                 sync_order_runtime_status(cur, state)
@@ -794,7 +824,11 @@ def fetch_floor_dashboard(facility_id: int = 1) -> dict:
                 and state["order"]["facility_id"] == facility_id
             ]
             if not active_states:
-                return {"summary": {"active_orders": 0, "active_quantity": 0}, "zones": []}
+                return {
+                    "summary": {"active_orders": 0, "active_quantity": 0},
+                    "zones": [],
+                    "capacities": capacities,
+                }
 
             zone_totals = {}
             for state in active_states:
@@ -858,7 +892,7 @@ def fetch_floor_dashboard(facility_id: int = 1) -> dict:
                 "recorded_minutes": display_state["order"]["recorded_minutes"],
             }
 
-    return {"summary": summary, "zones": zones}
+    return {"summary": summary, "zones": zones, "capacities": capacities}
 
 
 def fetch_operations_overview() -> dict:
@@ -899,6 +933,7 @@ def fetch_operations_overview() -> dict:
                         {
                             "zone_id": row["zone_id"],
                             "station": row["station"],
+                            "capacity": row["capacity"],
                             **totals.get(row["zone_id"], {"wip": 0, "done": 0, "orders": []}),
                         }
                         for row in facility_states[0]["balances"]
@@ -906,9 +941,16 @@ def fetch_operations_overview() -> dict:
                 else:
                     route_steps = fetch_route_steps(cur, facility["id"])
                     if route_steps:
-                        zone_order, zone_names, _, _ = build_zone_model(route_steps)
+                        zone_order, zone_names, _, _, zone_capacities = build_zone_model(route_steps)
                         stations = [
-                            {"zone_id": zone_id, "station": zone_names.get(zone_id, zone_id), "wip": 0, "done": 0, "orders": []}
+                            {
+                                "zone_id": zone_id,
+                                "station": zone_names.get(zone_id, zone_id),
+                                "capacity": zone_capacities.get(zone_id),
+                                "wip": 0,
+                                "done": 0,
+                                "orders": [],
+                            }
                             for zone_id in zone_order
                         ]
                 pipelines.append(
@@ -1070,6 +1112,33 @@ def fetch_order_history() -> dict:
     return {"orders": rows}
 
 
+def set_zone_capacity(payload: dict) -> dict:
+    zone_id = str(payload.get("zoneId", "")).strip()
+    capacity = payload.get("capacity")
+    if capacity is not None:
+        capacity = int(capacity)
+        if capacity < 1:
+            raise ValueError("Capacity must be at least 1, or empty for unconstrained.")
+        if capacity > 10000:
+            raise ValueError("Capacity is unrealistically large.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name, zone_type FROM zones WHERE id = %s", (zone_id,))
+            zone = cur.fetchone()
+            if not zone:
+                raise ValueError("Unknown zone.")
+            if zone["zone_type"] != "workstation":
+                raise ValueError("Capacity limits apply to workstations only.")
+            cur.execute(
+                "UPDATE zones SET capacity = %s WHERE id = %s",
+                (capacity, zone_id),
+            )
+        conn.commit()
+
+    return {"zoneId": zone_id, "name": zone["name"], "capacity": capacity}
+
+
 def build_ask_ai_context() -> tuple[str, dict]:
     """Render the live operations snapshot as compact text for the AI prompt."""
     data = fetch_operations_overview()
@@ -1096,7 +1165,9 @@ def build_ask_ai_context() -> tuple[str, dict]:
 
     for pipeline in data["pipelines"]:
         busy = [
-            f"{station['station']} (WIP {station['wip']}, orders {', '.join(station['orders'])})"
+            f"{station['station']} (WIP {station['wip']}"
+            + (f", capacity {station['capacity']}" if station.get("capacity") else "")
+            + f", orders {', '.join(station['orders'])})"
             for station in pipeline["stations"]
             if station["wip"] > 0
         ]
@@ -1331,13 +1402,16 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/production-orders", "/api/reset-activity", "/api/ask-ai"):
+        if path not in ("/api/production-orders", "/api/reset-activity", "/api/ask-ai", "/api/zone-capacity"):
             json_response(self, HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/zone-capacity":
+                json_response(self, HTTPStatus.OK, set_zone_capacity(payload))
+                return
             if path == "/api/ask-ai":
                 json_response(self, HTTPStatus.OK, ask_ai(payload))
                 return

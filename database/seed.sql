@@ -4,27 +4,27 @@ VALUES
 
 INSERT INTO zones (
   id, facility_id, name, zone_type, process_order, area_sq_ft, primary_flow,
-  status, description, map_x, map_y, map_width, map_height
+  status, description, capacity, map_x, map_y, map_width, map_height
 )
 VALUES
   ('receiving', 1, 'Receiving', 'dock', 1, 1800, 'Supplier receipt to Kitting', 'Open',
-   'Inbound dock for supplier deliveries and drone component receiving checks.', 90, 160, 140, 90),
+   'Inbound dock for supplier deliveries and drone component receiving checks.', NULL, 90, 160, 140, 90),
   ('raw', 1, 'Drone Component Kitting', 'warehouse', 2, 12500, 'Receiving to Airframe', 'Kits ready',
-   'Receives and stages frames, motors, ESCs, flight controllers, batteries, sensors, propellers, fasteners, and packaging.', 285, 160, 145, 90),
+   'Receives and stages frames, motors, ESCs, flight controllers, batteries, sensors, propellers, fasteners, and packaging.', NULL, 285, 160, 145, 90),
   ('ws1', 1, 'Workstation 1: Airframe + Motors', 'workstation', 3, 3800, 'Kitting to Electronics', 'Torque verified',
-   'Builds the drone frame, mounts arms and motors, routes motor wires, and checks frame alignment before tightening.', 475, 160, 140, 90),
+   'Builds the drone frame, mounts arms and motors, routes motor wires, and checks frame alignment before tightening.', 3, 475, 160, 140, 90),
   ('ws2', 1, 'Workstation 2: Electronics + Power', 'workstation', 4, 4100, 'Airframe to Firmware', 'ESD controlled',
-   'Installs ESCs, flight controller, receiver, power distribution, battery leads, GPS, cameras, and sensor modules.', 660, 160, 160, 90),
+   'Installs ESCs, flight controller, receiver, power distribution, battery leads, GPS, cameras, and sensor modules.', 3, 660, 160, 160, 90),
   ('ws3', 1, 'Workstation 3: Firmware + Calibration', 'workstation', 5, 3200, 'Electronics to Motor Test', 'Profiles loaded',
-   'Flashes firmware, configures flight controller orientation, binds transmitter and receiver, and calibrates sensors.', 865, 160, 160, 90),
+   'Flashes firmware, configures flight controller orientation, binds transmitter and receiver, and calibrates sensors.', 2, 865, 160, 160, 90),
   ('ws4', 1, 'Workstation 4: Motor/ESC Test + Props', 'workstation', 6, 3450, 'Calibration to QA', 'Guarded test stand',
-   'Runs motor direction and throttle tests without propellers, then installs matched clockwise and counterclockwise props.', 865, 405, 160, 90),
+   'Runs motor direction and throttle tests without propellers, then installs matched clockwise and counterclockwise props.', 2, 865, 405, 160, 90),
   ('ws5', 1, 'Workstation 5: Final QA + Flight Test', 'workstation', 7, 4800, 'QA to Packaging', 'Flight cage active',
-   'Verifies stability, flight control, GPS, camera/sensor function, communications, balance, and final acceptance.', 660, 405, 160, 90),
+   'Verifies stability, flight control, GPS, camera/sensor function, communications, balance, and final acceptance.', 2, 660, 405, 160, 90),
   ('fg', 1, 'Finished Goods: Packaged Drones', 'warehouse', 8, 9800, 'Pack to FG Inventory', 'Ready to move',
-   'Completes final inspection, documentation, and packaging before transfer to finished goods inventory.', 475, 405, 140, 90),
+   'Completes final inspection, documentation, and packaging before transfer to finished goods inventory.', NULL, 475, 405, 140, 90),
   ('inventory', 1, 'FG Inventory', 'warehouse', 9, 7500, 'Finished Goods Inventory', 'Available',
-   'Stores packaged finished drones as ready stock for allocation, picking, and shipment release.', 90, 405, 140, 90);
+   'Stores packaged finished drones as ready stock for allocation, picking, and shipment release.', NULL, 90, 405, 140, 90);
 
 INSERT INTO materials (id, sku, name, material_type, default_zone_id)
 VALUES
@@ -132,25 +132,25 @@ VALUES
 
 INSERT INTO zones (
   id, facility_id, name, zone_type, process_order, area_sq_ft, primary_flow,
-  status, description, map_x, map_y, map_width, map_height
+  status, description, capacity, map_x, map_y, map_width, map_height
 )
 VALUES
   ('case_receiving', 2, 'Case Receiving', 'dock', 1, 900, 'Supplier receipt to Case Staging', 'Open',
-   'Inbound dock for case shells, foam stock, and case hardware deliveries.', 90, 560, 120, 90),
+   'Inbound dock for case shells, foam stock, and case hardware deliveries.', NULL, 90, 560, 120, 90),
   ('case_raw', 2, 'Case Material Staging', 'warehouse', 2, 3200, 'Case Staging to Shell Forming', 'Kits ready',
-   'Stages molded shell blanks, foam blocks, and hardware kits for case orders.', 240, 560, 120, 90),
+   'Stages molded shell blanks, foam blocks, and hardware kits for case orders.', NULL, 240, 560, 120, 90),
   ('cws1', 2, 'Case WS1: Shell Forming + Trim', 'workstation', 3, 1600, 'Shell Forming to Foam Fit', 'Fixtures set',
-   'Forms and trims shell halves and checks hinge and latch mounting surfaces.', 390, 560, 120, 90),
+   'Forms and trims shell halves and checks hinge and latch mounting surfaces.', 4, 390, 560, 120, 90),
   ('cws2', 2, 'Case WS2: Foam Cutting + Fit', 'workstation', 4, 1400, 'Foam Fit to Hardware', 'Templates loaded',
-   'Cuts foam inserts and verifies drone, battery, and accessory cavity fit.', 540, 560, 120, 90),
+   'Cuts foam inserts and verifies drone, battery, and accessory cavity fit.', 4, 540, 560, 120, 90),
   ('cws3', 2, 'Case WS3: Hardware + Assembly', 'workstation', 5, 1500, 'Hardware to Inspection', 'Torque verified',
-   'Installs hinges, latches, handle, seal kit, and fastener hardware.', 690, 560, 120, 90),
+   'Installs hinges, latches, handle, seal kit, and fastener hardware.', 5, 690, 560, 120, 90),
   ('cws4', 2, 'Case WS4: Inspection + Label', 'workstation', 6, 1100, 'Inspection to Case FG', 'Gauges ready',
-   'Inspects closure, seal, and fit, then applies serial and compliance labels.', 840, 560, 120, 90),
+   'Inspects closure, seal, and fit, then applies serial and compliance labels.', 3, 840, 560, 120, 90),
   ('case_fg', 2, 'Case Finished Goods', 'warehouse', 7, 1800, 'Case FG to Case Inventory', 'Ready to move',
-   'Holds accepted finished cases before stocking into case inventory.', 990, 560, 120, 90),
+   'Holds accepted finished cases before stocking into case inventory.', NULL, 990, 560, 120, 90),
   ('case_inventory', 2, 'Case Inventory', 'warehouse', 8, 2200, 'Case stock to drone packaging pull', 'Available',
-   'Stores finished drone transport cases as pull stock for drone packaging.', 990, 430, 120, 90);
+   'Stores finished drone transport cases as pull stock for drone packaging.', NULL, 990, 430, 120, 90);
 
 INSERT INTO materials (id, sku, name, material_type, default_zone_id)
 VALUES

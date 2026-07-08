@@ -86,7 +86,7 @@ function renderSnapshot(snapshot) {
       (row) => `
         <tr>
           <td>${row.sequence_number}</td>
-          <td>${row.station}</td>
+          <td>${row.station}${row.capacity ? ` (cap ${row.capacity})` : ""}</td>
           <td>${row.wip_quantity}</td>
           <td>${row.completed_quantity}</td>
           <td>${row.hold_quantity}</td>

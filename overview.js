@@ -36,7 +36,7 @@ function renderPipelines(pipelines) {
                 (station) => `
                   <div class="pipeline-station${station.wip > 0 ? " busy" : ""}${station.done > 0 && station.wip === 0 ? " done" : ""}">
                     <span class="pipeline-station-name">${station.station}</span>
-                    <span class="pipeline-station-counts">WIP ${station.wip} | Done ${station.done}</span>
+                    <span class="pipeline-station-counts">WIP ${station.wip} | Done ${station.done}${station.capacity ? ` | Cap ${station.capacity}` : ""}</span>
                     ${station.orders.length ? `<span class="pipeline-station-order">${station.orders.join(", ")}</span>` : ""}
                   </div>
                 `

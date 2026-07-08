@@ -76,6 +76,10 @@ python database/create_production_order.py CASE-PO-1002 2 2026-06-14 --sku CASE-
 
 When an order completes on the simulated floor, the server books the finished quantity into stock at the route's final zone (cases into Case Inventory, drones into FG Inventory) and consumes any allocated inventory pulls (the drone order's case).
 
+## Workstation Capacity
+
+Each workstation zone has a `capacity` (units it can work on at once; NULL = unconstrained). Orders larger than a station's capacity run in batches, multiplying that station's cycle time in the floor simulation — a quantity-10 order through a capacity-2 station takes 5 cycles. Warehouses and docks are unconstrained. Capacities are seeded per workstation and editable from the floor maps (click a workstation → Capacity field in the detail panel, backed by `POST /api/zone-capacity` with `{zoneId, capacity|null}`; workstations only). Existing databases get the column via `migrations/002_workstation_capacity.sql`.
+
 ## Timing Test Logic
 
 For dashboard testing, a production order defaults to a 5-minute end-to-end test cycle. Set `TEST_TOTAL_MINUTES` before starting `server.py` to tune the full test duration. For example, `TEST_TOTAL_MINUTES=10` makes the simulated production route complete in 10 minutes. If `TEST_TOTAL_MINUTES` is not set to a positive value, the server falls back to `TEST_TIME_FACTOR`. The UI also computes actual-time utilization as:

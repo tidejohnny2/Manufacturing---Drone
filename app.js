@@ -97,6 +97,7 @@ const dashboardStation = document.querySelector("#dashboardStation");
 const dashboardProgress = document.querySelector("#dashboardProgress");
 const dashboardUtilization = document.querySelector("#dashboardUtilization");
 let dashboardByZone = {};
+let capacityByZone = {};
 
 function titleCase(value) {
   return value
@@ -132,6 +133,18 @@ function selectZone(zoneId) {
     ? `Queue ${dashboard.queued ?? 0} | WIP ${dashboard.wip} | Done ${dashboard.completed} | Hold ${dashboard.hold} | ${compactOrderList(dashboard.orders) || compactOrderList(dashboard.queued_orders) || "No active order"}`
     : zone.status;
 
+  const capacityRow = document.querySelector("#capacityRow");
+  if (capacityRow) {
+    const capInfo = capacityByZone[zoneId];
+    const isWorkstation = capInfo?.zone_type === "workstation";
+    capacityRow.hidden = !isWorkstation;
+    if (isWorkstation) {
+      document.querySelector("#capacityInput").value = capInfo.capacity ?? "";
+      document.querySelector("#capacityMsg").textContent =
+        capInfo.capacity ? `${capInfo.capacity} unit(s) at a time` : "Unconstrained";
+    }
+  }
+
   zoneNodes.forEach((node) => {
     node.classList.toggle("active", node.dataset.zone === zoneId);
   });
@@ -143,9 +156,11 @@ function selectZone(zoneId) {
 
 function metricParts(row) {
   const holdText = row.hold > 0 ? ` | Hold ${row.hold}` : "";
+  const capacity = capacityByZone[row.zone_id]?.capacity;
+  const capText = capacity ? ` | Cap ${capacity}` : "";
   const orderText = compactOrderList(row.orders) || compactOrderList(row.queued_orders);
   return {
-    counts: `Q ${row.queued ?? 0} | WIP ${row.wip} | Done ${row.completed}${holdText}`,
+    counts: `Q ${row.queued ?? 0} | WIP ${row.wip} | Done ${row.completed}${holdText}${capText}`,
     order: orderText ? `Order ${orderText}` : ""
   };
 }
@@ -171,6 +186,7 @@ function renderMetricNode(node, row) {
 
 function renderDashboard(data) {
   dashboardByZone = {};
+  capacityByZone = data.capacities ?? capacityByZone;
   data.zones.forEach((row) => {
     dashboardByZone[row.zone_id] = row;
   });
@@ -185,6 +201,7 @@ function renderDashboard(data) {
 
   zoneMetricNodes.forEach((node) => {
     const row = dashboardByZone[node.dataset.zoneMetric] ?? {
+      zone_id: node.dataset.zoneMetric,
       wip: 0,
       completed: 0,
       hold: 0,
@@ -233,6 +250,40 @@ function setDetailsVisible(isVisible) {
 detailsToggle.addEventListener("click", () => {
   setDetailsVisible(body.classList.contains("details-hidden"));
 });
+
+const capacitySaveButton = document.querySelector("#capacitySave");
+if (capacitySaveButton) {
+  capacitySaveButton.addEventListener("click", async () => {
+    const zoneId = document.querySelector(".zone.active")?.dataset.zone;
+    const raw = document.querySelector("#capacityInput").value.trim();
+    const message = document.querySelector("#capacityMsg");
+    if (!zoneId) {
+      return;
+    }
+    message.textContent = "Saving…";
+    try {
+      const response = await fetch("/api/zone-capacity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ zoneId, capacity: raw === "" ? null : Number(raw) })
+      });
+      const data = await response.json();
+      if (!response.ok || data.error) {
+        message.textContent = data.error ?? "Save failed.";
+        return;
+      }
+      if (capacityByZone[zoneId]) {
+        capacityByZone[zoneId].capacity = data.capacity;
+      }
+      message.textContent = data.capacity
+        ? `Saved: ${data.capacity} unit(s) at a time`
+        : "Saved: unconstrained";
+      loadDashboard().catch(() => {});
+    } catch (error) {
+      message.textContent = "Save failed.";
+    }
+  });
+}
 
 zoneNodes.forEach((node) => {
   node.addEventListener("click", () => selectZone(node.dataset.zone));

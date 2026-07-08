@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS zones (
   primary_flow TEXT NOT NULL,
   status TEXT NOT NULL,
   description TEXT NOT NULL,
+  -- Units the station can work on at once; NULL = unconstrained. Orders larger
+  -- than capacity run in batches, multiplying the station's cycle time.
+  capacity INTEGER,
   map_x INTEGER NOT NULL,
   map_y INTEGER NOT NULL,
   map_width INTEGER NOT NULL,
@@ -199,6 +202,7 @@ CREATE TABLE IF NOT EXISTS production_workstation_ledger (
 -- match these definitions, so every statement here is a safe no-op for them.
 ALTER TABLE bom_items DROP CONSTRAINT IF EXISTS bom_items_part_number_key;
 ALTER TABLE bom_items ADD COLUMN IF NOT EXISTS source_zone_id TEXT REFERENCES zones(id);
+ALTER TABLE zones ADD COLUMN IF NOT EXISTS capacity INTEGER;
 DO $$
 BEGIN
   ALTER TABLE bom_items ADD CONSTRAINT bom_items_parent_part_unique UNIQUE (parent_material_id, part_number);

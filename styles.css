@@ -1334,3 +1334,40 @@ body.view-rework .shipping-route {
   font-weight: 700;
   cursor: pointer;
 }
+
+/* Workstation capacity editor (floor map detail panel) */
+.capacity-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.capacity-edit input {
+  width: 76px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+}
+
+.capacity-edit button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  background: var(--oa-accent);
+  color: var(--oa-accent-fg);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.capacity-edit button:hover {
+  background: var(--oa-accent-hover);
+}
+
+.capacity-msg {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--muted);
+}
