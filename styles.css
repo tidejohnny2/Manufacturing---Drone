@@ -933,3 +933,26 @@ body.view-rework .shipping-route {
   color: #2b6c60;
   font-weight: 900;
 }
+
+/* Reset activity control */
+.danger-button {
+  min-height: 36px;
+  border: 1px solid #a33a2e;
+  background: #fff;
+  color: #a33a2e;
+  font-weight: 800;
+  cursor: pointer;
+  padding: 6px 12px;
+  justify-self: start;
+}
+
+.danger-button:hover {
+  background: #a33a2e;
+  color: #fff;
+}
+
+.reset-note {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+}

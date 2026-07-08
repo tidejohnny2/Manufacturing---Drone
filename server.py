@@ -1054,6 +1054,31 @@ def fetch_order_history() -> dict:
     return {"orders": rows}
 
 
+def reset_activity(payload: dict) -> dict:
+    if str(payload.get("confirm", "")).strip() != "RESET":
+        raise ValueError('Type RESET to confirm deleting all production activity.')
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT reset_activity()")
+            cur.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM production_orders) AS production_orders,
+                  (SELECT count(*) FROM inventory_transactions) AS inventory_transactions,
+                  (SELECT count(*) FROM work_orders) AS work_orders,
+                  (SELECT count(*) FROM production_workstation_ledger) AS ledger_rows,
+                  (SELECT count(*) FROM bom_items) AS bom_items,
+                  (SELECT count(*) FROM zones) AS zones,
+                  (SELECT count(*) FROM materials) AS materials
+                """
+            )
+            counts = cur.fetchone()
+        conn.commit()
+
+    return {"reset": True, "counts": counts}
+
+
 def create_order(payload: dict) -> dict:
     order_no = str(payload.get("orderNo", "")).strip()
     quantity = int(payload.get("quantity", 0))
@@ -1140,13 +1165,16 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/production-orders":
+        if path not in ("/api/production-orders", "/api/reset-activity"):
             json_response(self, HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/reset-activity":
+                json_response(self, HTTPStatus.OK, reset_activity(payload))
+                return
             json_response(self, HTTPStatus.CREATED, create_order(payload))
         except ValueError as exc:
             json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
