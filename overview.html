@@ -23,6 +23,8 @@
           <a class="nav-link" href="production-orders.html">Orders</a>
           <a class="nav-link" href="inventory.html">Inventory</a>
           <a class="nav-link" href="bom.html">BOM</a>
+          <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
+          <button type="button" class="ask-ai-button" onclick="toggleAskAI()">Ask AI</button>
         </div>
       </header>
 
@@ -133,6 +135,33 @@
         </table>
       </section>
     </main>
+
+    <aside id="askPanel" class="ask-panel" aria-label="Ask AI panel">
+      <div class="ask-panel-head">
+        <strong>Ask AI</strong>
+        <span id="askStatus" class="ask-status offline">● Checking…</span>
+        <button type="button" class="ask-close" onclick="toggleAskAI()" aria-label="Close">&times;</button>
+      </div>
+      <div id="askThread" class="ask-thread">
+        <div class="ask-bubble">
+          Hi! I can answer questions about what is happening in the plant right now — orders, stations,
+          case stock, shortages, and recent inventory movements. Ask me anything or tap a suggestion.
+        </div>
+      </div>
+      <div class="ask-chips">
+        <button type="button" class="ask-chip">What is running right now?</button>
+        <button type="button" class="ask-chip">Do we have enough cases in stock?</button>
+        <button type="button" class="ask-chip">Any shortages I should worry about?</button>
+        <button type="button" class="ask-chip">What was completed today?</button>
+      </div>
+      <form id="askForm" class="ask-form">
+        <input id="askInput" autocomplete="off" placeholder="Ask AI…" />
+        <button type="submit">Send</button>
+      </form>
+    </aside>
+
+    <script src="theme.js"></script>
+    <script src="ask-ai.js"></script>
     <script src="overview.js"></script>
   </body>
 </html>
