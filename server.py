@@ -1085,15 +1085,35 @@ def fetch_schedule() -> dict:
                 route_steps = fetch_route_steps(cur, facility["id"])
                 if not route_steps:
                     continue
-                zone_order, zone_names, _, _, capacities = build_zone_model(route_steps)
-                stations = [
-                    {
-                        "zone_id": zone_id,
-                        "station": zone_names.get(zone_id, zone_id),
-                        "capacity": capacities.get(zone_id),
-                    }
-                    for zone_id in zone_order[:-1]
-                ]
+                zone_order, zone_names, _, standard_durations, capacities = build_zone_model(route_steps)
+
+                # Max output per station: capacity units per recorded cycle.
+                # The slowest constrained station is the line's bottleneck.
+                stations = []
+                for zone_id in zone_order[:-1]:
+                    capacity = capacities.get(zone_id)
+                    cycle_minutes = standard_durations.get(zone_id)
+                    max_per_hour = (
+                        round(capacity * 60 / cycle_minutes, 1)
+                        if capacity and cycle_minutes
+                        else None
+                    )
+                    stations.append(
+                        {
+                            "zone_id": zone_id,
+                            "station": zone_names.get(zone_id, zone_id),
+                            "capacity": capacity,
+                            "cycle_minutes": cycle_minutes,
+                            "max_per_hour": max_per_hour,
+                            "bottleneck": False,
+                        }
+                    )
+                constrained = [s for s in stations if s["max_per_hour"] is not None]
+                if constrained:
+                    slowest = min(s["max_per_hour"] for s in constrained)
+                    for station in stations:
+                        if station["max_per_hour"] == slowest:
+                            station["bottleneck"] = True
 
                 orders = []
                 for state in active_states:
@@ -1126,6 +1146,73 @@ def fetch_schedule() -> dict:
     return {"now": datetime.now(timezone.utc).isoformat(), "lines": lines}
 
 
+def resolve_finished_good(cur, finished_sku: str) -> dict:
+    cur.execute(
+        """
+        SELECT m.id AS material_id, z.facility_id
+        FROM materials m
+        JOIN zones z ON z.id = m.default_zone_id
+        WHERE m.sku = %s AND m.material_type = 'finished'
+        """,
+        (finished_sku,),
+    )
+    finished = cur.fetchone()
+    if not finished:
+        raise ValueError(f"Unknown finished good {finished_sku}.")
+    return finished
+
+
+def project_phantom(facility_orders, route_steps, finished_sku, quantity, due_date, now):
+    """Simulate a prospective order appended to the facility's live queue."""
+    zone_order, zone_names, _, _, _ = build_zone_model(route_steps)
+    phantom = {
+        "id": -1,
+        "order_no": "PREVIEW",
+        "finished_good": finished_sku,
+        "quantity": quantity,
+        "status": "planned",
+        "current_zone_id": zone_order[0],
+        "current_zone": zone_names.get(zone_order[0], zone_order[0]),
+        "start_date": now.date(),
+        "due_date": due_date or str(now.date()),
+        "created_at": now,
+        "facility_id": None,
+    }
+    states = simulated_pipeline_state(facility_orders + [phantom], route_steps)
+    phantom_state = next(state for state in states if state["order"]["id"] == -1)
+    return phantom_state, zone_names
+
+
+def pull_impact(cur, material_id: int, quantity: int) -> list[dict]:
+    cur.execute(
+        """
+        SELECT bi.part_number, bi.description, bi.quantity, bi.source_zone_id,
+               i.quantity_available
+        FROM bom_items bi
+        LEFT JOIN inventory_items i
+          ON i.location_zone_id = bi.source_zone_id
+         AND i.part_number = bi.part_number
+        WHERE bi.parent_material_id = %s AND bi.source_zone_id IS NOT NULL
+        """,
+        (material_id,),
+    )
+    pulls = []
+    for row in cur.fetchall():
+        required = float(row["quantity"]) * quantity
+        available = float(row["quantity_available"] or 0)
+        pulls.append(
+            {
+                "part_number": row["part_number"],
+                "description": row["description"],
+                "required": required,
+                "available": available,
+                "short": required > available,
+                "shortfall": max(0, math.ceil(required - available)),
+            }
+        )
+    return pulls
+
+
 def preview_schedule(payload: dict) -> dict:
     """What-if: project a prospective order through the current queue without creating it."""
     finished_sku = str(payload.get("finishedSku", DEFAULT_FINISHED_SKU)).strip() or DEFAULT_FINISHED_SKU
@@ -1136,87 +1223,108 @@ def preview_schedule(payload: dict) -> dict:
 
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT m.id AS material_id, z.facility_id
-                FROM materials m
-                JOIN zones z ON z.id = m.default_zone_id
-                WHERE m.sku = %s AND m.material_type = 'finished'
-                """,
-                (finished_sku,),
-            )
-            finished = cur.fetchone()
-            if not finished:
-                raise ValueError(f"Unknown finished good {finished_sku}.")
+            finished = resolve_finished_good(cur, finished_sku)
             facility_id = finished["facility_id"]
 
             route_steps = fetch_route_steps(cur, facility_id)
             if not route_steps:
                 raise ValueError("No route defined for that product.")
-            zone_order, zone_names, _, _, _ = build_zone_model(route_steps)
 
             now = datetime.now(timezone.utc)
-            phantom = {
-                "id": -1,
-                "order_no": "PREVIEW",
-                "finished_good": finished_sku,
-                "quantity": quantity,
-                "status": "planned",
-                "current_zone_id": zone_order[0],
-                "current_zone": zone_names.get(zone_order[0], zone_order[0]),
-                "start_date": now.date(),
-                "due_date": due_date or str(now.date()),
-                "created_at": now,
-                "facility_id": facility_id,
-            }
-
             facility_orders = [
                 order for order in fetch_active_orders(cur) if order["facility_id"] == facility_id
             ]
-            facility_orders.append(phantom)
-            states = simulated_pipeline_state(facility_orders, route_steps)
-            phantom_state = next(state for state in states if state["order"]["id"] == -1)
+            phantom_state, zone_names = project_phantom(
+                facility_orders, route_steps, finished_sku, quantity, due_date, now
+            )
             segments = schedule_segments(phantom_state, zone_names)
 
-            # Inventory-pull impact (e.g. transport cases for a drone order).
-            cur.execute(
-                """
-                SELECT bi.part_number, bi.description, bi.quantity, bi.source_zone_id,
-                       i.quantity_available
-                FROM bom_items bi
-                LEFT JOIN inventory_items i
-                  ON i.location_zone_id = bi.source_zone_id
-                 AND i.part_number = bi.part_number
-                WHERE bi.parent_material_id = %s AND bi.source_zone_id IS NOT NULL
-                """,
-                (finished["material_id"],),
-            )
-            pulls = []
-            for row in cur.fetchall():
-                required = float(row["quantity"]) * quantity
-                available = float(row["quantity_available"] or 0)
-                pulls.append(
-                    {
-                        "part_number": row["part_number"],
-                        "description": row["description"],
-                        "required": required,
-                        "available": available,
-                        "short": required > available,
-                        "shortfall": max(0, math.ceil(required - available)),
-                    }
-                )
+            pulls = pull_impact(cur, finished["material_id"], quantity)
 
     return {
         "finished_good": finished_sku,
         "facility_id": facility_id,
         "quantity": quantity,
-        "due_date": phantom["due_date"],
+        "due_date": phantom_state["order"]["due_date"],
         "now": now.isoformat(),
         "start": segments[0]["start"] if segments else None,
         "finish": segments[-1]["end"] if segments else None,
         "planned_test_minutes": phantom_state["order"]["planned_test_minutes"],
         "recorded_minutes": phantom_state["order"]["recorded_minutes"],
         "segments": segments,
+        "pulls": pulls,
+    }
+
+
+def max_output_schedule(payload: dict) -> dict:
+    """Largest quantity of a product the line can finish within a wall-clock window."""
+    finished_sku = str(payload.get("finishedSku", DEFAULT_FINISHED_SKU)).strip() or DEFAULT_FINISHED_SKU
+    window_minutes = int(payload.get("windowMinutes", 15))
+    if window_minutes < 1 or window_minutes > 1440:
+        raise ValueError("Window must be between 1 and 1440 minutes.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            finished = resolve_finished_good(cur, finished_sku)
+            facility_id = finished["facility_id"]
+            route_steps = fetch_route_steps(cur, facility_id)
+            if not route_steps:
+                raise ValueError("No route defined for that product.")
+
+            now = datetime.now(timezone.utc)
+            deadline = now + timedelta(minutes=window_minutes)
+            facility_orders = [
+                order for order in fetch_active_orders(cur) if order["facility_id"] == facility_id
+            ]
+
+            def finish_for(qty: int) -> datetime:
+                state, _ = project_phantom(facility_orders, route_steps, finished_sku, qty, "", now)
+                return state["schedule"][-1]["end"]
+
+            CAP = 10000
+            if finish_for(1) > deadline:
+                max_quantity = 0
+            else:
+                high = 1
+                while high < CAP and finish_for(high * 2) <= deadline:
+                    high *= 2
+                if high >= CAP:
+                    max_quantity = CAP
+                else:
+                    low, infeasible = high, high * 2
+                    while infeasible - low > 1:
+                        mid = (low + infeasible) // 2
+                        if finish_for(mid) <= deadline:
+                            low = mid
+                        else:
+                            infeasible = mid
+                    max_quantity = low
+
+            if max_quantity == 0:
+                return {
+                    "finished_good": finished_sku,
+                    "facility_id": facility_id,
+                    "window_minutes": window_minutes,
+                    "deadline": deadline.isoformat(),
+                    "max_quantity": 0,
+                    "note": "Not even one unit can finish inside that window with the current queue.",
+                }
+
+            phantom_state, zone_names = project_phantom(
+                facility_orders, route_steps, finished_sku, max_quantity, "", now
+            )
+            segments = schedule_segments(phantom_state, zone_names)
+            pulls = pull_impact(cur, finished["material_id"], max_quantity)
+
+    return {
+        "finished_good": finished_sku,
+        "facility_id": facility_id,
+        "window_minutes": window_minutes,
+        "deadline": deadline.isoformat(),
+        "max_quantity": max_quantity,
+        "start": segments[0]["start"] if segments else None,
+        "finish": segments[-1]["end"] if segments else None,
+        "planned_test_minutes": phantom_state["order"]["planned_test_minutes"],
         "pulls": pulls,
     }
 
@@ -1588,6 +1696,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/ask-ai",
             "/api/zone-capacity",
             "/api/schedule/preview",
+            "/api/schedule/max-output",
         ):
             json_response(self, HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
@@ -1597,6 +1706,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if path == "/api/schedule/preview":
                 json_response(self, HTTPStatus.OK, preview_schedule(payload))
+                return
+            if path == "/api/schedule/max-output":
+                json_response(self, HTTPStatus.OK, max_output_schedule(payload))
                 return
             if path == "/api/zone-capacity":
                 json_response(self, HTTPStatus.OK, set_zone_capacity(payload))
