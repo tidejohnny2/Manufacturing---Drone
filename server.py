@@ -351,7 +351,7 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
         state_order["station_test_minutes"] = round(current_duration, 1)
         state_order["station_recorded_minutes"] = round(current_duration / simulation_factor if simulation_factor else 0, 1)
 
-        states.append({"order": state_order, "balances": balances})
+        states.append({"order": state_order, "balances": balances, "schedule": schedule})
 
     return states
 
@@ -1047,6 +1047,180 @@ def fetch_operations_overview() -> dict:
     }
 
 
+def schedule_segments(state: dict, zone_names: dict) -> list[dict]:
+    return [
+        {
+            "zone_id": segment["zone_id"],
+            "station": zone_names.get(segment["zone_id"], segment["zone_id"]),
+            "start": segment["start"].isoformat(),
+            "end": segment["end"].isoformat(),
+        }
+        for segment in state["schedule"]
+    ]
+
+
+def fetch_schedule() -> dict:
+    """Station-by-station occupancy for every active order on both lines."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            all_states = simulate_active_states(cur)
+            for state in all_states:
+                sync_order_runtime_status(cur, state)
+                if state["order"]["production_status"] == "queued":
+                    normalize_queued_order(cur, state)
+                else:
+                    sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
+            complete_finished_pipeline_orders(cur, all_states)
+            conn.commit()
+
+            active_states = [
+                state for state in all_states if state["order"]["production_status"] != "complete"
+            ]
+
+            cur.execute("SELECT id, name FROM facilities ORDER BY id")
+            facilities = cur.fetchall()
+
+            lines = []
+            for facility in facilities:
+                route_steps = fetch_route_steps(cur, facility["id"])
+                if not route_steps:
+                    continue
+                zone_order, zone_names, _, _, capacities = build_zone_model(route_steps)
+                stations = [
+                    {
+                        "zone_id": zone_id,
+                        "station": zone_names.get(zone_id, zone_id),
+                        "capacity": capacities.get(zone_id),
+                    }
+                    for zone_id in zone_order[:-1]
+                ]
+
+                orders = []
+                for state in active_states:
+                    if state["order"]["facility_id"] != facility["id"]:
+                        continue
+                    segments = schedule_segments(state, zone_names)
+                    orders.append(
+                        {
+                            "order_no": state["order"]["order_no"],
+                            "finished_good": state["order"]["finished_good"],
+                            "quantity": state["order"]["quantity"],
+                            "production_status": state["order"]["production_status"],
+                            "percent_complete": state["order"]["percent_complete"],
+                            "due_date": str(state["order"]["due_date"]),
+                            "start": segments[0]["start"] if segments else None,
+                            "finish": segments[-1]["end"] if segments else None,
+                            "segments": segments,
+                        }
+                    )
+
+                lines.append(
+                    {
+                        "facility_id": facility["id"],
+                        "facility_name": facility["name"],
+                        "stations": stations,
+                        "orders": orders,
+                    }
+                )
+
+    return {"now": datetime.now(timezone.utc).isoformat(), "lines": lines}
+
+
+def preview_schedule(payload: dict) -> dict:
+    """What-if: project a prospective order through the current queue without creating it."""
+    finished_sku = str(payload.get("finishedSku", DEFAULT_FINISHED_SKU)).strip() or DEFAULT_FINISHED_SKU
+    quantity = int(payload.get("quantity", 0))
+    due_date = str(payload.get("dueDate", "")).strip()
+    if quantity <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id AS material_id, z.facility_id
+                FROM materials m
+                JOIN zones z ON z.id = m.default_zone_id
+                WHERE m.sku = %s AND m.material_type = 'finished'
+                """,
+                (finished_sku,),
+            )
+            finished = cur.fetchone()
+            if not finished:
+                raise ValueError(f"Unknown finished good {finished_sku}.")
+            facility_id = finished["facility_id"]
+
+            route_steps = fetch_route_steps(cur, facility_id)
+            if not route_steps:
+                raise ValueError("No route defined for that product.")
+            zone_order, zone_names, _, _, _ = build_zone_model(route_steps)
+
+            now = datetime.now(timezone.utc)
+            phantom = {
+                "id": -1,
+                "order_no": "PREVIEW",
+                "finished_good": finished_sku,
+                "quantity": quantity,
+                "status": "planned",
+                "current_zone_id": zone_order[0],
+                "current_zone": zone_names.get(zone_order[0], zone_order[0]),
+                "start_date": now.date(),
+                "due_date": due_date or str(now.date()),
+                "created_at": now,
+                "facility_id": facility_id,
+            }
+
+            facility_orders = [
+                order for order in fetch_active_orders(cur) if order["facility_id"] == facility_id
+            ]
+            facility_orders.append(phantom)
+            states = simulated_pipeline_state(facility_orders, route_steps)
+            phantom_state = next(state for state in states if state["order"]["id"] == -1)
+            segments = schedule_segments(phantom_state, zone_names)
+
+            # Inventory-pull impact (e.g. transport cases for a drone order).
+            cur.execute(
+                """
+                SELECT bi.part_number, bi.description, bi.quantity, bi.source_zone_id,
+                       i.quantity_available
+                FROM bom_items bi
+                LEFT JOIN inventory_items i
+                  ON i.location_zone_id = bi.source_zone_id
+                 AND i.part_number = bi.part_number
+                WHERE bi.parent_material_id = %s AND bi.source_zone_id IS NOT NULL
+                """,
+                (finished["material_id"],),
+            )
+            pulls = []
+            for row in cur.fetchall():
+                required = float(row["quantity"]) * quantity
+                available = float(row["quantity_available"] or 0)
+                pulls.append(
+                    {
+                        "part_number": row["part_number"],
+                        "description": row["description"],
+                        "required": required,
+                        "available": available,
+                        "short": required > available,
+                        "shortfall": max(0, math.ceil(required - available)),
+                    }
+                )
+
+    return {
+        "finished_good": finished_sku,
+        "facility_id": facility_id,
+        "quantity": quantity,
+        "due_date": phantom["due_date"],
+        "now": now.isoformat(),
+        "start": segments[0]["start"] if segments else None,
+        "finish": segments[-1]["end"] if segments else None,
+        "planned_test_minutes": phantom_state["order"]["planned_test_minutes"],
+        "recorded_minutes": phantom_state["order"]["recorded_minutes"],
+        "segments": segments,
+        "pulls": pulls,
+    }
+
+
 def fetch_order_history() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -1398,17 +1572,32 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
         if path == "/api/ask-ai/status":
             json_response(self, HTTPStatus.OK, {"live": ask_ai_available(), "model": ANTHROPIC_MODEL})
             return
+        if path == "/api/schedule":
+            try:
+                json_response(self, HTTPStatus.OK, fetch_schedule())
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/production-orders", "/api/reset-activity", "/api/ask-ai", "/api/zone-capacity"):
+        if path not in (
+            "/api/production-orders",
+            "/api/reset-activity",
+            "/api/ask-ai",
+            "/api/zone-capacity",
+            "/api/schedule/preview",
+        ):
             json_response(self, HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/schedule/preview":
+                json_response(self, HTTPStatus.OK, preview_schedule(payload))
+                return
             if path == "/api/zone-capacity":
                 json_response(self, HTTPStatus.OK, set_zone_capacity(payload))
                 return

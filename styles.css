@@ -1371,3 +1371,176 @@ body.view-rework .shipping-route {
   font-weight: 700;
   color: var(--muted);
 }
+
+/* Production schedule board (station Gantt) */
+.schedule-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+}
+
+.create-planned {
+  background: #059669 !important;
+}
+
+.create-planned:hover {
+  background: #047857 !important;
+}
+
+.preview-result {
+  font-size: 0.86rem;
+  color: #334155;
+  display: grid;
+  gap: 6px;
+}
+
+.preview-result p {
+  margin: 0;
+}
+
+.preview-warn {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.preview-ok {
+  color: #047857;
+  font-weight: 700;
+}
+
+.ontime {
+  color: #047857;
+}
+
+.late {
+  color: #dc2626;
+}
+
+.gantt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+  font-size: 0.78rem;
+  color: #334155;
+}
+
+.gantt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gantt-chip strong {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.gantt-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.ghost-dot {
+  border: 2px dashed #64748b;
+  background: transparent;
+}
+
+.gantt-grid {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 6px 10px;
+  align-items: stretch;
+}
+
+.gantt-station {
+  display: flex;
+  align-items: center;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.gantt-track {
+  position: relative;
+  min-height: 30px;
+  background: repeating-linear-gradient(90deg, #f8fafc 0 60px, #f1f5f9 60px 61px);
+  border: 1px solid #e2e8f0;
+  overflow: hidden;
+}
+
+.gantt-bar {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.gantt-bar.ghost {
+  background: rgba(100, 116, 139, 0.12);
+  border: 2px dashed #64748b;
+  color: #475569;
+}
+
+.gantt-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #dc2626;
+  z-index: 2;
+}
+
+.gantt-axis {
+  position: relative;
+  height: 20px;
+}
+
+.gantt-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 0.68rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.gantt-tick:first-child {
+  transform: none;
+}
+
+.gantt-tick:last-child {
+  transform: translateX(-100%);
+}
+
+.gantt-nowline-note {
+  margin-top: 8px;
+  font-size: 0.7rem;
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.gantt-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 720px) {
+  .schedule-form {
+    grid-template-columns: 1fr;
+  }
+
+  .gantt-grid {
+    grid-template-columns: 120px minmax(0, 1fr);
+  }
+}
