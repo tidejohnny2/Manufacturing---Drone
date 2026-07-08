@@ -227,10 +227,11 @@ CREATE INDEX IF NOT EXISTS idx_inventory_transactions_order ON inventory_transac
 CREATE INDEX IF NOT EXISTS idx_workstation_ledger_order ON production_workstation_ledger(production_order_id, transaction_at);
 CREATE INDEX IF NOT EXISTS idx_workstation_ledger_zone ON production_workstation_ledger(zone_id, transaction_type);
 
--- Drop pre-case-line signatures so the generalized functions below fully replace
+-- Drop earlier signatures so the generalized functions below fully replace
 -- them instead of overloading them.
 DROP FUNCTION IF EXISTS next_production_order_no();
 DROP FUNCTION IF EXISTS create_production_order(TEXT, INTEGER, DATE, DATE);
+DROP FUNCTION IF EXISTS create_production_order(TEXT, INTEGER, DATE, DATE, TEXT);
 
 CREATE OR REPLACE FUNCTION next_production_order_no(p_prefix TEXT DEFAULT 'DRN-PO-')
 RETURNS TEXT
@@ -256,7 +257,8 @@ CREATE OR REPLACE FUNCTION create_production_order(
   p_quantity INTEGER,
   p_due_date DATE,
   p_start_date DATE DEFAULT CURRENT_DATE,
-  p_finished_sku TEXT DEFAULT 'DRN-FG-600'
+  p_finished_sku TEXT DEFAULT 'DRN-FG-600',
+  p_auto_replenish BOOLEAN DEFAULT TRUE
 )
 RETURNS INTEGER
 LANGUAGE plpgsql
@@ -269,6 +271,9 @@ DECLARE
   v_entry_zone_name TEXT;
   v_pull RECORD;
   v_available NUMERIC(12, 3);
+  v_shortfall INTEGER;
+  v_pull_is_manufactured BOOLEAN;
+  v_replenish_order_no TEXT;
 BEGIN
   IF p_quantity <= 0 THEN
     RAISE EXCEPTION 'Production order quantity must be greater than zero';
@@ -345,6 +350,34 @@ BEGIN
       UPDATE production_order_materials
       SET status = 'short'
       WHERE id = v_pull.pom_id;
+
+      -- Auto-replenishment: a short manufactured pull (such as the transport
+      -- case) auto-creates a linked production order for the shortfall so the
+      -- supplying line starts building without manual intervention.
+      SELECT EXISTS (
+        SELECT 1 FROM materials
+        WHERE sku = v_pull.part_number AND material_type = 'finished'
+      )
+      INTO v_pull_is_manufactured;
+
+      IF p_auto_replenish AND v_pull_is_manufactured THEN
+        v_shortfall := CEIL(v_pull.required_quantity - COALESCE(v_available, 0))::INTEGER;
+        v_replenish_order_no := next_production_order_no(split_part(v_pull.part_number, '-', 1) || '-PO-');
+
+        PERFORM create_production_order(
+          v_replenish_order_no, v_shortfall, p_due_date, p_start_date,
+          v_pull.part_number, FALSE
+        );
+
+        INSERT INTO production_order_activity (
+          production_order_id, activity_type, quantity, notes
+        )
+        VALUES (
+          v_order_id, 'adjusted', v_shortfall,
+          'Shortage of ' || v_pull.part_number || ': auto-created replenishment order '
+            || v_replenish_order_no || ' for ' || v_shortfall || ' each.'
+        );
+      END IF;
     ELSE
       UPDATE inventory_items
       SET quantity_allocated = quantity_allocated + v_pull.required_quantity,

@@ -425,6 +425,65 @@ def post_completion_inventory(cur, order: dict, final_zone_id: str) -> None:
         (order["id"], final_zone_id, order["finished_good"], order["quantity"], order["order_no"]),
     )
 
+    # Newly stocked finished goods satisfy waiting short pull lines (oldest
+    # order first), so a replenishment case order landing in Case Inventory
+    # automatically allocates to the drone order that triggered it.
+    cur.execute(
+        """
+        SELECT pom.id, pom.part_number, pom.required_quantity, pom.unit,
+               bi.source_zone_id, po.order_no AS waiting_order_no, po.id AS waiting_order_id
+        FROM production_order_materials pom
+        JOIN bom_items bi ON bi.id = pom.bom_item_id
+        JOIN production_orders po ON po.id = pom.production_order_id
+        WHERE pom.status = 'short'
+          AND pom.part_number = %s
+          AND bi.source_zone_id = %s
+          AND po.status NOT IN ('complete', 'cancelled')
+        ORDER BY po.id
+        """,
+        (order["finished_good"], final_zone_id),
+    )
+    for waiting in cur.fetchall():
+        cur.execute(
+            """
+            SELECT quantity_available FROM inventory_items
+            WHERE location_zone_id = %s AND part_number = %s
+            """,
+            (waiting["source_zone_id"], waiting["part_number"]),
+        )
+        available_row = cur.fetchone()
+        if not available_row or available_row["quantity_available"] < waiting["required_quantity"]:
+            continue
+        cur.execute(
+            """
+            UPDATE inventory_items
+            SET quantity_allocated = quantity_allocated + %s, updated_at = now()
+            WHERE location_zone_id = %s AND part_number = %s
+            """,
+            (waiting["required_quantity"], waiting["source_zone_id"], waiting["part_number"]),
+        )
+        cur.execute(
+            "UPDATE production_order_materials SET status = 'allocated' WHERE id = %s",
+            (waiting["id"],),
+        )
+        cur.execute(
+            """
+            INSERT INTO inventory_transactions (
+              production_order_id, transaction_type, from_zone_id, part_number,
+              quantity, unit, reference
+            )
+            VALUES (%s, 'allocate', %s, %s, %s, %s, %s)
+            """,
+            (
+                waiting["waiting_order_id"],
+                waiting["source_zone_id"],
+                waiting["part_number"],
+                waiting["required_quantity"],
+                waiting["unit"],
+                waiting["waiting_order_no"],
+            ),
+        )
+
     # Consume allocated inventory-pull components (such as transport cases) from stock.
     cur.execute(
         """

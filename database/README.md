@@ -65,7 +65,7 @@ SELECT create_production_order('DRN-PO-1002', 1, '2026-06-14', '2026-06-04');
 SELECT create_production_order('CASE-PO-1002', 2, '2026-06-14', '2026-06-04', 'CASE-FG-500');
 ```
 
-Arguments are `order_no`, `quantity`, `due_date`, optional `start_date`, and optional `finished_sku` (defaults to `DRN-FG-600`). Creating a drone order also allocates one transport case per drone from Case Inventory; if stock is short the case line shows status `short` instead.
+Arguments are `order_no`, `quantity`, `due_date`, optional `start_date`, optional `finished_sku` (defaults to `DRN-FG-600`), and optional `auto_replenish` (defaults to true). Creating a drone order also allocates one transport case per drone from Case Inventory. If stock is short, the case line shows status `short` AND a linked replenishment case order is auto-created for the shortfall, so the case line starts building immediately. When replenishment stock lands in Case Inventory, waiting short lines are automatically allocated (oldest order first).
 
 You can also create one from PowerShell after `DATABASE_URL` is set:
 
