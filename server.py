@@ -15,6 +15,22 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 ACTIVE_STATUSES = ("planned", "released", "in_progress", "hold")
 DEFAULT_FINISHED_SKU = "DRN-FG-600"
 ORDER_PREFIXES = {"DRN-FG-600": "DRN-PO-", "CASE-FG-500": "CASE-PO-"}
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+ASK_AI_SYSTEM = (
+    "You are the Ask AI assistant embedded in the Operations Overview of a drone "
+    "manufacturing demo plant. The plant has two production lines: the drone floor "
+    "(builds DRN-FG-600 packaged inspection drones) and the case line (builds "
+    "CASE-FG-500 transport cases, stocked into Case Inventory and pulled by drone "
+    "packaging; shortages auto-create replenishment case orders). Answer questions "
+    "using ONLY the live data snapshot provided with each question. Be concise and "
+    "operational. Use markdown bullet lists or small tables when they help. If the "
+    "snapshot does not contain the answer, say so briefly. Quantities are in each "
+    "unless stated otherwise."
+)
+
+
+def ask_ai_available() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def order_prefix_for(finished_sku: str) -> str:
@@ -1054,6 +1070,153 @@ def fetch_order_history() -> dict:
     return {"orders": rows}
 
 
+def build_ask_ai_context() -> tuple[str, dict]:
+    """Render the live operations snapshot as compact text for the AI prompt."""
+    data = fetch_operations_overview()
+    lines = ["LIVE PLANT SNAPSHOT"]
+    summary = data["summary"]
+    lines.append(
+        f"Summary: {summary['active_orders']} active orders, "
+        f"{summary['active_quantity']} units in WIP, "
+        f"{summary['lines_running']} lines running, "
+        f"{summary['shortage_count']} shortages."
+    )
+
+    lines.append("Active orders:")
+    if data["orders"]:
+        for order in data["orders"]:
+            line_name = "drone floor" if order["facility_id"] == 1 else "case line"
+            lines.append(
+                f"- {order['order_no']} ({order['finished_good']}, qty {order['quantity']}, {line_name}): "
+                f"{order['production_status']} at {order['current_zone']}, "
+                f"{order['percent_complete']}% complete, due {order['due_date']}"
+            )
+    else:
+        lines.append("- none (both lines idle)")
+
+    for pipeline in data["pipelines"]:
+        busy = [
+            f"{station['station']} (WIP {station['wip']}, orders {', '.join(station['orders'])})"
+            for station in pipeline["stations"]
+            if station["wip"] > 0
+        ]
+        lines.append(
+            f"{pipeline['facility_name']}: {pipeline['active_orders']} active orders; "
+            + ("busy stations: " + "; ".join(busy) if busy else "all stations idle")
+        )
+
+    lines.append("Inventory watch (on hand/allocated/available, min-max):")
+    for row in data["inventory_watch"]:
+        lines.append(
+            f"- {row['part_number']} ({row['item_name']}, {row['area']} at {row['location']}): "
+            f"{row['quantity_on_hand']}/{row['quantity_allocated']}/{row['quantity_available']}, "
+            f"min {row['min_quantity']} max {row['max_quantity']}, status {row['status']}"
+        )
+
+    if data["shortages"]:
+        lines.append("Shortages on open orders:")
+        for shortage in data["shortages"]:
+            lines.append(
+                f"- {shortage['order_no']} is short {shortage['required_quantity']} {shortage['unit']} "
+                f"of {shortage['part_number']} ({shortage['description']})"
+            )
+    else:
+        lines.append("Shortages: none.")
+
+    if data["completed_today"]:
+        lines.append("Completed today:")
+        for completed in data["completed_today"]:
+            lines.append(
+                f"- {completed['quantity']} x {completed['sku']} across {completed['orders']} order(s)"
+            )
+    else:
+        lines.append("Completed today: nothing yet.")
+
+    lines.append("Recent inventory movements (newest first):")
+    for txn in data["recent_transactions"]:
+        route = ""
+        if txn["from_zone"]:
+            route += f" from {txn['from_zone']}"
+        if txn["to_zone"]:
+            route += f" to {txn['to_zone']}"
+        lines.append(
+            f"- {txn['transaction_type']} {txn['quantity']} x {txn['part_number']}{route} ({txn['reference']})"
+        )
+
+    return "\n".join(lines), data
+
+
+def offline_ask_ai_answer(context_text: str) -> str:
+    """No-Claude fallback: return the snapshot itself as a readable answer."""
+    lines = context_text.split("\n")[1:]
+    return "Here is the current plant status:\n" + "\n".join(
+        line if line.startswith("-") else f"**{line}**" for line in lines if line.strip()
+    )
+
+
+def ask_ai(payload: dict) -> dict:
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        raise ValueError("Ask a question about the plant.")
+    if len(question) > 2000:
+        raise ValueError("Question is too long.")
+
+    context_text, _ = build_ask_ai_context()
+
+    if not ask_ai_available():
+        return {
+            "answer": offline_ask_ai_answer(context_text),
+            "mode": "offline",
+            "note": "Offline mode - set ANTHROPIC_API_KEY on the server to enable Claude.",
+        }
+
+    try:
+        import anthropic
+    except ImportError:
+        return {
+            "answer": offline_ask_ai_answer(context_text),
+            "mode": "offline",
+            "note": "Offline mode - the anthropic Python package is not installed on the server.",
+        }
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=2048,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "low"},
+            system=ASK_AI_SYSTEM,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{context_text}\n\nQuestion: {question}",
+                }
+            ],
+        )
+        answer = next(
+            (block.text for block in response.content if block.type == "text"), ""
+        )
+        if not answer:
+            raise RuntimeError("Claude returned no text answer")
+        return {"answer": answer, "mode": "claude", "model": ANTHROPIC_MODEL}
+    except anthropic.AuthenticationError:
+        note = "Claude unavailable - the configured API key was rejected."
+    except anthropic.RateLimitError:
+        note = "Claude unavailable - rate limited, try again shortly."
+    except anthropic.APIConnectionError:
+        note = "Claude unavailable - network error reaching the API."
+    except anthropic.APIStatusError as exc:
+        note = f"Claude unavailable - API error {exc.status_code}."
+    except Exception as exc:
+        note = f"Claude unavailable - {type(exc).__name__}."
+    return {
+        "answer": offline_ask_ai_answer(context_text),
+        "mode": "offline",
+        "note": note,
+    }
+
+
 def reset_activity(payload: dict) -> dict:
     if str(payload.get("confirm", "")).strip() != "RESET":
         raise ValueError('Type RESET to confirm deleting all production activity.')
@@ -1161,17 +1324,23 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
+        if path == "/api/ask-ai/status":
+            json_response(self, HTTPStatus.OK, {"live": ask_ai_available(), "model": ANTHROPIC_MODEL})
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/api/production-orders", "/api/reset-activity"):
+        if path not in ("/api/production-orders", "/api/reset-activity", "/api/ask-ai"):
             json_response(self, HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if path == "/api/ask-ai":
+                json_response(self, HTTPStatus.OK, ask_ai(payload))
+                return
             if path == "/api/reset-activity":
                 json_response(self, HTTPStatus.OK, reset_activity(payload))
                 return
