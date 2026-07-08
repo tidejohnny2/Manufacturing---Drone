@@ -58,6 +58,15 @@ function updateSqlPreview() {
 function renderSnapshot(snapshot) {
   if (!snapshot.order) {
     setMessage("No production orders found. Create the first order.");
+    activeOrder.textContent = "None";
+    orderStatus.textContent = "-";
+    buildQty.textContent = "-";
+    currentBalance.textContent = "-";
+    timeUtilization.textContent = "-";
+    balancesBody.innerHTML = "";
+    materialsBody.innerHTML = "";
+    activityList.innerHTML = "";
+    ledgerBody.innerHTML = "";
     return;
   }
 
@@ -249,6 +258,34 @@ async function refreshNextOrderNo() {
 
 finishedGoodSelect.addEventListener("change", () => {
   refreshNextOrderNo().catch((error) => setMessage(error.message, true));
+});
+
+document.querySelector("#resetActivity").addEventListener("click", async () => {
+  const confirmation = window.prompt(
+    "This deletes ALL production activity (orders, ledgers, transactions, work orders) " +
+    "and restores inventory to seed levels. Header data is kept.\n\nType RESET to confirm:"
+  );
+  if (confirmation === null) {
+    return;
+  }
+  if (confirmation.trim() !== "RESET") {
+    setMessage("Reset cancelled: confirmation text did not match RESET.", true);
+    return;
+  }
+  setMessage("Resetting production activity...");
+  const response = await fetch("/api/reset-activity", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "RESET" })
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    setMessage(result.error ?? "Unable to reset activity.", true);
+    return;
+  }
+  selectedOrderNo = null;
+  setMessage("All production activity deleted. Header data and seed inventory levels restored.");
+  await loadLatestOrder().catch(() => {});
 });
 
 orderForm.addEventListener("submit", createOrder);

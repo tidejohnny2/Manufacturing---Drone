@@ -469,3 +469,51 @@ BEGIN
   RETURN v_order_id;
 END;
 $$;
+
+-- Deletes all production activity while preserving the header entities
+-- (facilities, zones, materials, process_steps, bom_items, and the
+-- inventory_items / inventory_balances rows themselves). Deleting
+-- production_orders cascades to order materials, operations, workstation
+-- balances, order activity, and the workstation ledger. Inventory quantities
+-- are restored to the seed baseline below - keep the VALUES list in sync
+-- with seed.sql when seed stock changes.
+CREATE OR REPLACE FUNCTION reset_activity()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  DELETE FROM inventory_transactions;
+  DELETE FROM production_orders;
+  DELETE FROM work_orders;
+
+  UPDATE inventory_items AS i
+  SET quantity_on_hand = baseline.on_hand,
+      quantity_allocated = baseline.allocated,
+      updated_at = now()
+  FROM (
+    VALUES
+      ('DRN-FRM-001', 'raw', 12::NUMERIC, 1::NUMERIC),
+      ('DRN-ARM-001', 'raw', 12, 1),
+      ('DRN-MTR-001', 'raw', 48, 4),
+      ('DRN-ESC-001', 'ws2', 40, 4),
+      ('DRN-FC-001', 'ws2', 10, 1),
+      ('DRN-BAT-001', 'ws2', 8, 1),
+      ('DRN-PROP-001', 'ws4', 18, 1),
+      ('DRN-PKG-001', 'fg', 9, 1),
+      ('DRN-WIP-AIR', 'ws1', 1, 1),
+      ('DRN-WIP-ELEC', 'ws2', 0, 0),
+      ('DRN-WIP-FW', 'ws3', 0, 0),
+      ('DRN-WIP-QA', 'ws5', 0, 0),
+      ('DRN-WIP-RWK', 'raw', 0, 0),
+      ('DRN-FG-600', 'inventory', 3, 1),
+      ('CASE-SHL-001', 'cws1', 14, 1),
+      ('CASE-FOAM-001', 'cws2', 10, 1),
+      ('CASE-LTC-001', 'cws3', 30, 2),
+      ('CASE-LBL-001', 'cws4', 16, 1),
+      ('CASE-WIP-FORM', 'cws1', 0, 0),
+      ('CASE-FG-500', 'case_inventory', 4, 0)
+  ) AS baseline(part_number, location_zone_id, on_hand, allocated)
+  WHERE i.part_number = baseline.part_number
+    AND i.location_zone_id = baseline.location_zone_id;
+END;
+$$;
