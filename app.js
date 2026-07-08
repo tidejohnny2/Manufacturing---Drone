@@ -1,4 +1,8 @@
-const zones = {
+// Per-page floor config: case-floor.html sets window.FLOOR_CONFIG before this
+// script loads; index.html omits it and gets the drone floor defaults below.
+const floorConfig = window.FLOOR_CONFIG ?? {};
+
+const zones = floorConfig.zones ?? {
   receiving: {
     name: "Receiving",
     description:
@@ -202,7 +206,8 @@ async function loadDashboard() {
     return;
   }
 
-  const response = await fetch("/api/floor-dashboard");
+  const facilityQuery = floorConfig.facility ? `?facility=${floorConfig.facility}` : "";
+  const response = await fetch(`/api/floor-dashboard${facilityQuery}`);
   const data = await response.json();
   if (!response.ok) {
     throw new Error(data.error ?? "Unable to load floor dashboard.");
@@ -240,7 +245,7 @@ zoneNodes.forEach((node) => {
 });
 
 setView("process");
-selectZone("receiving");
+selectZone(floorConfig.initialZone ?? "receiving");
 setDetailsVisible(false);
 loadDashboard().catch(() => {});
 setInterval(() => {

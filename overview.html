@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Operations Overview</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="bom-shell">
+      <header class="bom-header">
+        <div>
+          <p class="eyebrow">Plant-wide status</p>
+          <h1>Operations Overview</h1>
+          <p class="bom-intro">
+            The 30,000-foot view: every active order across the drone floor and the case line, live station
+            balances, inventory health, shortages, and the latest inventory movements. Refreshes automatically.
+          </p>
+        </div>
+        <div class="bom-actions">
+          <a class="nav-link" href="index.html">Drone Floor</a>
+          <a class="nav-link" href="case-floor.html">Case Floor</a>
+          <a class="nav-link" href="production-orders.html">Orders</a>
+          <a class="nav-link" href="inventory.html">Inventory</a>
+          <a class="nav-link" href="bom.html">BOM</a>
+        </div>
+      </header>
+
+      <section class="bom-summary production-summary" aria-label="Plant summary">
+        <div>
+          <span>Active orders</span>
+          <strong id="sumOrders">0</strong>
+        </div>
+        <div>
+          <span>Units in WIP</span>
+          <strong id="sumQuantity">0</strong>
+        </div>
+        <div>
+          <span>Lines running</span>
+          <strong id="sumLines">0</strong>
+        </div>
+        <div>
+          <span>Case stock available</span>
+          <strong id="sumCaseStock">0</strong>
+        </div>
+        <div>
+          <span>Drone FG available</span>
+          <strong id="sumDroneStock">0</strong>
+        </div>
+        <div>
+          <span>Shortages</span>
+          <strong id="sumShortages">0</strong>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Production line pipelines">
+        <h2>Production Lines</h2>
+        <div id="pipelines"></div>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Active orders across all lines">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Order No.</th>
+              <th>Item</th>
+              <th>Line</th>
+              <th>Status</th>
+              <th>Current Station</th>
+              <th>Progress</th>
+              <th>Qty</th>
+              <th>Due</th>
+            </tr>
+          </thead>
+          <tbody id="ordersBody">
+            <tr><td colspan="8">No active orders.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Inventory watch">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Location</th>
+              <th>Item</th>
+              <th>Part Number</th>
+              <th>On Hand</th>
+              <th>Allocated</th>
+              <th>Available</th>
+              <th>Min</th>
+              <th>Max</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="inventoryBody">
+          </tbody>
+        </table>
+      </section>
+
+      <section class="plan-band" aria-label="Shortages and completions">
+        <h2>Alerts &amp; Today</h2>
+        <div class="plan-cards">
+          <article>
+            <span>Shortage alerts</span>
+            <strong id="shortageTitle">None</strong>
+            <p id="shortageDetail">All inventory-pull lines on open orders are covered by stock.</p>
+          </article>
+          <article>
+            <span>Completed today</span>
+            <strong id="completedTitle">Nothing yet</strong>
+            <p id="completedDetail">Finished orders booked into stock today appear here.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Recent inventory movements">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Part Number</th>
+              <th>Qty</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Reference</th>
+            </tr>
+          </thead>
+          <tbody id="activityBody">
+          </tbody>
+        </table>
+      </section>
+    </main>
+    <script src="overview.js"></script>
+  </body>
+</html>

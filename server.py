@@ -786,6 +786,150 @@ def fetch_floor_dashboard(facility_id: int = 1) -> dict:
     return {"summary": summary, "zones": zones}
 
 
+def fetch_operations_overview() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            all_states = simulate_active_states(cur)
+            for state in all_states:
+                sync_order_runtime_status(cur, state)
+                if state["order"]["production_status"] == "queued":
+                    normalize_queued_order(cur, state)
+                else:
+                    sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
+            complete_finished_pipeline_orders(cur, all_states)
+            conn.commit()
+
+            active_states = [state for state in all_states if state["order"]["production_status"] != "complete"]
+
+            cur.execute("SELECT id, name FROM facilities ORDER BY id")
+            facilities = cur.fetchall()
+
+            pipelines = []
+            for facility in facilities:
+                facility_states = [
+                    state for state in active_states
+                    if state["order"]["facility_id"] == facility["id"]
+                ]
+                stations = []
+                if facility_states:
+                    totals = {}
+                    for state in facility_states:
+                        for row in state["balances"]:
+                            zone = totals.setdefault(row["zone_id"], {"wip": 0, "done": 0, "orders": []})
+                            zone["wip"] += row["wip_quantity"]
+                            zone["done"] += row["completed_quantity"]
+                            if row["wip_quantity"] > 0:
+                                zone["orders"].append(state["order"]["order_no"])
+                    stations = [
+                        {
+                            "zone_id": row["zone_id"],
+                            "station": row["station"],
+                            **totals.get(row["zone_id"], {"wip": 0, "done": 0, "orders": []}),
+                        }
+                        for row in facility_states[0]["balances"]
+                    ]
+                else:
+                    route_steps = fetch_route_steps(cur, facility["id"])
+                    if route_steps:
+                        zone_order, zone_names, _, _ = build_zone_model(route_steps)
+                        stations = [
+                            {"zone_id": zone_id, "station": zone_names.get(zone_id, zone_id), "wip": 0, "done": 0, "orders": []}
+                            for zone_id in zone_order
+                        ]
+                pipelines.append(
+                    {
+                        "facility_id": facility["id"],
+                        "facility_name": facility["name"],
+                        "active_orders": len(facility_states),
+                        "stations": stations,
+                    }
+                )
+
+            orders = [
+                {
+                    "order_no": state["order"]["order_no"],
+                    "finished_good": state["order"]["finished_good"],
+                    "facility_id": state["order"]["facility_id"],
+                    "quantity": state["order"]["quantity"],
+                    "production_status": state["order"]["production_status"],
+                    "current_zone": state["order"]["current_zone"],
+                    "percent_complete": state["order"]["percent_complete"],
+                    "due_date": state["order"]["due_date"],
+                }
+                for state in active_states
+            ]
+
+            cur.execute(
+                """
+                SELECT i.area, z.name AS location, i.item_name, i.part_number,
+                       i.quantity_on_hand, i.quantity_allocated, i.quantity_available,
+                       i.min_quantity, i.max_quantity, i.status
+                FROM inventory_items i
+                JOIN zones z ON z.id = i.location_zone_id
+                WHERE i.area IN ('Sub-assembly', 'Finished Goods')
+                   OR (i.area = 'Parts' AND i.quantity_available <= i.min_quantity)
+                ORDER BY
+                  CASE i.area WHEN 'Sub-assembly' THEN 1 WHEN 'Finished Goods' THEN 2 ELSE 3 END,
+                  i.id
+                """
+            )
+            inventory_watch = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT po.order_no, pom.part_number, pom.description,
+                       pom.required_quantity, pom.unit
+                FROM production_order_materials pom
+                JOIN production_orders po ON po.id = pom.production_order_id
+                WHERE pom.status = 'short' AND po.status NOT IN ('complete', 'cancelled')
+                ORDER BY po.id
+                """
+            )
+            shortages = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT m.sku, count(*) AS orders, COALESCE(sum(po.quantity), 0) AS quantity
+                FROM production_orders po
+                JOIN materials m ON m.id = po.finished_material_id
+                WHERE po.status = 'complete' AND po.updated_at::date = CURRENT_DATE
+                GROUP BY m.sku
+                ORDER BY m.sku
+                """
+            )
+            completed_today = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT t.created_at, t.transaction_type, t.part_number, t.quantity, t.reference,
+                       fz.name AS from_zone, tz.name AS to_zone
+                FROM inventory_transactions t
+                LEFT JOIN zones fz ON fz.id = t.from_zone_id
+                LEFT JOIN zones tz ON tz.id = t.to_zone_id
+                ORDER BY t.id DESC
+                LIMIT 10
+                """
+            )
+            recent_transactions = cur.fetchall()
+
+            summary = {
+                "active_orders": len(active_states),
+                "active_quantity": sum(state["order"]["quantity"] for state in active_states),
+                "lines_running": len({state["order"]["facility_id"] for state in active_states}),
+                "shortage_count": len(shortages),
+            }
+
+    return {
+        "summary": summary,
+        "pipelines": pipelines,
+        "orders": orders,
+        "inventory_watch": inventory_watch,
+        "shortages": shortages,
+        "completed_today": completed_today,
+        "recent_transactions": recent_transactions,
+    }
+
+
 def fetch_order_history() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -924,6 +1068,12 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             try:
                 facility_id = int(query.get("facility", ["1"])[0])
                 json_response(self, HTTPStatus.OK, fetch_floor_dashboard(facility_id))
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        if path == "/api/operations-overview":
+            try:
+                json_response(self, HTTPStatus.OK, fetch_operations_overview())
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return

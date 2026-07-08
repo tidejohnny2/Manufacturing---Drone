@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drone Case Line Floor Map</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="details-hidden">
+    <main class="app-shell">
+      <section class="map-panel" aria-label="Drone case line floor map">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Case production line</p>
+            <h1>Drone Case Line Floor Map</h1>
+          </div>
+          <div class="controls" aria-label="Map controls">
+            <a class="nav-link" href="index.html">Drone Floor</a>
+            <a class="nav-link" href="overview.html">Overview</a>
+            <a class="nav-link" href="production-orders.html">Orders</a>
+            <a class="nav-link" href="inventory.html">Inventory</a>
+            <a class="nav-link" href="bom.html">BOM</a>
+            <button id="detailsToggle" class="nav-link" type="button" aria-controls="detailPanel" aria-expanded="false">
+              Show Details
+            </button>
+            <div class="segmented" role="group" aria-label="Map view">
+              <button class="active" type="button" data-view="process">Process</button>
+              <button type="button" data-view="material">Material</button>
+              <button type="button" data-view="rework">Rework</button>
+            </div>
+            <label class="toggle">
+              <input id="routeToggle" type="checkbox" checked />
+              <span>Routes</span>
+            </label>
+          </div>
+        </header>
+
+        <section class="floor-dashboard-strip" aria-label="Case production dashboard summary">
+          <div>
+            <span>Active Order</span>
+            <strong id="dashboardOrder">None</strong>
+          </div>
+          <div>
+            <span>Production Status</span>
+            <strong id="dashboardStatus">None</strong>
+          </div>
+          <div>
+            <span>Current Station</span>
+            <strong id="dashboardStation">No active order</strong>
+          </div>
+          <div>
+            <span>Progress</span>
+            <strong id="dashboardProgress">0%</strong>
+          </div>
+          <div>
+            <span>Time Utilization</span>
+            <strong id="dashboardUtilization">0%</strong>
+          </div>
+        </section>
+
+        <div class="floor-wrap">
+          <svg class="floor-map" viewBox="0 0 1200 720" role="img" aria-labelledby="mapTitle mapDesc">
+            <title id="mapTitle">Drone case line process floor map</title>
+            <desc id="mapDesc">
+              Clean pastel process boxes show drone transport case manufacturing from material staging through case inventory.
+            </desc>
+
+            <defs>
+              <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#dde3dc" stroke-width="1" />
+              </pattern>
+              <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M 2 2 L 10 6 L 2 10 z" fill="#2b6c60" />
+              </marker>
+              <marker id="reworkArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M 2 2 L 10 6 L 2 10 z" fill="#6f8f88" />
+              </marker>
+            </defs>
+
+            <rect class="building" x="28" y="28" width="1144" height="664" rx="10" />
+            <rect class="grid" x="52" y="52" width="1096" height="616" rx="6" />
+
+            <g class="route-layer">
+              <path class="route main-route" d="M 260 205 H 880 V 455 H 260" />
+            </g>
+
+            <g class="zone zone-receiving active" data-zone="case_receiving" tabindex="0" role="button" aria-label="Case materials receiving dock">
+              <rect class="zone-footprint" x="90" y="150" width="170" height="110" rx="6" />
+              <text class="box-label" x="175" y="188">Case Receiving</text>
+              <text class="box-subtitle" x="175" y="214">Shells + hardware</text>
+              <text class="box-metric" x="175" y="236" data-zone-metric="case_receiving">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-raw" data-zone="case_raw" tabindex="0" role="button" aria-label="Case material staging warehouse">
+              <rect class="zone-footprint" x="285" y="150" width="170" height="110" rx="6" />
+              <text class="box-label" x="370" y="188">Staging</text>
+              <text class="box-subtitle" x="370" y="214">Kits + foam</text>
+              <text class="box-metric" x="370" y="236" data-zone-metric="case_raw">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-ws1" data-zone="cws1" tabindex="0" role="button" aria-label="Case shell forming and trim workstation">
+              <rect class="zone-footprint" x="480" y="150" width="170" height="110" rx="6" />
+              <text class="box-label" x="565" y="188">Shell Forming</text>
+              <text class="box-subtitle" x="565" y="214">Form + trim</text>
+              <text class="box-metric" x="565" y="236" data-zone-metric="cws1">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-ws2" data-zone="cws2" tabindex="0" role="button" aria-label="Case foam cutting and fit workstation">
+              <rect class="zone-footprint" x="675" y="150" width="175" height="110" rx="6" />
+              <text class="box-label" x="762.5" y="188">Foam Fit</text>
+              <text class="box-subtitle" x="762.5" y="214">Cut + fit inserts</text>
+              <text class="box-metric" x="762.5" y="236" data-zone-metric="cws2">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-ws3" data-zone="cws3" tabindex="0" role="button" aria-label="Case hardware and assembly workstation">
+              <rect class="zone-footprint" x="675" y="400" width="175" height="110" rx="6" />
+              <text class="box-label" x="762.5" y="438">Hardware</text>
+              <text class="box-subtitle" x="762.5" y="464">Hinges + latches</text>
+              <text class="box-metric" x="762.5" y="486" data-zone-metric="cws3">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-ws5" data-zone="cws4" tabindex="0" role="button" aria-label="Case inspection and label workstation">
+              <rect class="zone-footprint" x="480" y="400" width="170" height="110" rx="6" />
+              <text class="box-label" x="565" y="438">Inspection</text>
+              <text class="box-subtitle" x="565" y="464">Seal + labels</text>
+              <text class="box-metric" x="565" y="486" data-zone-metric="cws4">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-fg" data-zone="case_fg" tabindex="0" role="button" aria-label="Case finished goods warehouse">
+              <rect class="zone-footprint" x="285" y="400" width="170" height="110" rx="6" />
+              <text class="box-label" x="370" y="438">Case FG</text>
+              <text class="box-subtitle" x="370" y="464">Accepted cases</text>
+              <text class="box-metric" x="370" y="486" data-zone-metric="case_fg">WIP 0 | Done 0</text>
+            </g>
+
+            <g class="zone zone-inventory" data-zone="case_inventory" tabindex="0" role="button" aria-label="Case inventory pull stock">
+              <rect class="zone-footprint" x="90" y="400" width="170" height="110" rx="6" />
+              <text class="box-label" x="175" y="438">Case Inventory</text>
+              <text class="box-subtitle" x="175" y="464">Drone pull stock</text>
+              <text class="box-metric" x="175" y="486" data-zone-metric="case_inventory">WIP 0 | Done 0</text>
+            </g>
+
+            <text class="rework-label" x="370" y="630">Cases stocked here are pulled by drone packaging</text>
+          </svg>
+        </div>
+      </section>
+
+      <aside id="detailPanel" class="detail-panel" aria-live="polite" hidden>
+        <p class="eyebrow">Selected zone</p>
+        <h2 id="zoneName">Case Receiving</h2>
+        <p id="zoneDescription">
+          Inbound dock for case shells, foam stock, and case hardware deliveries.
+        </p>
+        <dl class="metrics">
+          <div>
+            <dt>Area</dt>
+            <dd id="zoneArea">900 sq ft</dd>
+          </div>
+          <div>
+            <dt>Primary flow</dt>
+            <dd id="zoneFlow">Receiving to Staging</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="zoneStatus">Open</dd>
+          </div>
+        </dl>
+        <div class="sequence" aria-label="Case manufacturing sequence">
+          <span class="current" data-step="case_receiving">Receiving</span>
+          <span data-step="case_raw">Staging</span>
+          <span data-step="cws1">Shell Forming</span>
+          <span data-step="cws2">Foam Fit</span>
+          <span data-step="cws3">Hardware</span>
+          <span data-step="cws4">Inspection</span>
+          <span data-step="case_fg">Case FG</span>
+          <span data-step="case_inventory">Case Inventory</span>
+        </div>
+      </aside>
+    </main>
+    <script>
+      window.FLOOR_CONFIG = {
+        facility: 2,
+        initialZone: "case_receiving",
+        zones: {
+          case_receiving: {
+            name: "Case Receiving",
+            description: "Inbound dock for case shells, foam stock, and case hardware deliveries.",
+            area: "900 sq ft",
+            flow: "Receiving to Staging",
+            status: "Open"
+          },
+          case_raw: {
+            name: "Case Material Staging",
+            description: "Stages molded shell blanks, foam blocks, and hardware kits for case orders.",
+            area: "3,200 sq ft",
+            flow: "Staging to Shell Forming",
+            status: "Kits ready"
+          },
+          cws1: {
+            name: "Case WS1: Shell Forming + Trim",
+            description: "Forms and trims shell halves and checks hinge and latch mounting surfaces.",
+            area: "1,600 sq ft",
+            flow: "Shell Forming to Foam Fit",
+            status: "Fixtures set"
+          },
+          cws2: {
+            name: "Case WS2: Foam Cutting + Fit",
+            description: "Cuts foam inserts and verifies drone, battery, and accessory cavity fit.",
+            area: "1,400 sq ft",
+            flow: "Foam Fit to Hardware",
+            status: "Templates loaded"
+          },
+          cws3: {
+            name: "Case WS3: Hardware + Assembly",
+            description: "Installs hinges, latches, handle, seal kit, and fastener hardware.",
+            area: "1,500 sq ft",
+            flow: "Hardware to Inspection",
+            status: "Torque verified"
+          },
+          cws4: {
+            name: "Case WS4: Inspection + Label",
+            description: "Inspects closure, seal, and fit, then applies serial and compliance labels.",
+            area: "1,100 sq ft",
+            flow: "Inspection to Case FG",
+            status: "Gauges ready"
+          },
+          case_fg: {
+            name: "Case Finished Goods",
+            description: "Holds accepted finished cases before stocking into case inventory.",
+            area: "1,800 sq ft",
+            flow: "Case FG to Case Inventory",
+            status: "Ready to move"
+          },
+          case_inventory: {
+            name: "Case Inventory",
+            description: "Stores finished drone transport cases as pull stock for drone packaging.",
+            area: "2,200 sq ft",
+            flow: "Case stock to drone packaging pull",
+            status: "Available"
+          }
+        }
+      };
+    </script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -863,3 +863,73 @@ body.view-rework .shipping-route {
     grid-template-columns: 1fr;
   }
 }
+
+/* Operations overview: production line pipeline strips */
+.pipeline {
+  margin-bottom: 14px;
+}
+
+.pipeline-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.pipeline-title span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.pipeline-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.pipeline-station {
+  min-width: 110px;
+  padding: 8px 10px;
+  border: 1px solid rgba(22, 33, 31, 0.14);
+  background: #f6f8f5;
+  display: grid;
+  gap: 3px;
+  align-content: start;
+}
+
+.pipeline-station.busy {
+  background: #dff0e4;
+  border-color: #2b6c60;
+}
+
+.pipeline-station.done {
+  background: #eef1ec;
+}
+
+.pipeline-station-name {
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  color: #1d312b;
+}
+
+.pipeline-station-counts {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.pipeline-station-order {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #1f4e44;
+}
+
+.pipeline-arrow {
+  align-self: center;
+  color: #2b6c60;
+  font-weight: 900;
+}
