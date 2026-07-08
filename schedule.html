@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Production Schedule</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="bom-shell">
+      <header class="bom-header">
+        <div>
+          <p class="eyebrow">Plan across both lines</p>
+          <h1>Production Schedule</h1>
+          <p class="bom-intro">
+            Station-by-station schedule for every active order on the drone floor and the case line,
+            projected from current queues and workstation capacities. Preview a prospective order to see
+            when it would finish before creating it.
+          </p>
+        </div>
+        <div class="bom-actions">
+          <a class="nav-link" href="overview.html">Overview</a>
+          <a class="nav-link" href="index.html">Drone Floor</a>
+          <a class="nav-link" href="case-floor.html">Case Floor</a>
+          <a class="nav-link" href="production-orders.html">Orders</a>
+          <a class="nav-link" href="inventory.html">Inventory</a>
+          <a class="nav-link" href="bom.html">BOM</a>
+          <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
+        </div>
+      </header>
+
+      <section class="order-create" aria-label="What-if order planner">
+        <div>
+          <h2>Plan an Order (What-If)</h2>
+          <form id="previewForm" class="order-form schedule-form">
+            <label>
+              <span>Finished Good</span>
+              <select id="previewSku">
+                <option value="DRN-FG-600" selected>DRN-FG-600 — Drone</option>
+                <option value="CASE-FG-500">CASE-FG-500 — Transport Case</option>
+              </select>
+            </label>
+            <label>
+              <span>Quantity</span>
+              <input id="previewQty" type="number" value="3" min="1" />
+            </label>
+            <label>
+              <span>Due Date</span>
+              <input id="previewDue" type="date" />
+            </label>
+            <button type="submit">Preview</button>
+            <button type="button" id="createPlanned" class="create-planned" hidden>Create This Order</button>
+          </form>
+          <p id="previewMessage" class="form-message" role="status"></p>
+        </div>
+        <div id="previewCard" class="sql-card">
+          <span>Projection</span>
+          <div id="previewResult" class="preview-result">Preview an order to see its projected schedule.</div>
+        </div>
+      </section>
+
+      <div id="ganttLines"></div>
+    </main>
+    <script src="theme.js"></script>
+    <script src="schedule.js"></script>
+  </body>
+</html>
