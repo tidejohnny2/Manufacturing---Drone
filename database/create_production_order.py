@@ -12,15 +12,20 @@ except ImportError as exc:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a drone production order in PostgreSQL."
+        description="Create a drone or case production order in PostgreSQL."
     )
-    parser.add_argument("order_no", help="Production order number, for example DRN-PO-1002")
-    parser.add_argument("quantity", type=int, help="Finished drone quantity to build")
+    parser.add_argument("order_no", help="Production order number, for example DRN-PO-1002 or CASE-PO-1002")
+    parser.add_argument("quantity", type=int, help="Finished good quantity to build")
     parser.add_argument("due_date", help="Due date in YYYY-MM-DD format")
     parser.add_argument(
         "--start-date",
         default=None,
         help="Optional start date in YYYY-MM-DD format. Defaults to current date in PostgreSQL.",
+    )
+    parser.add_argument(
+        "--sku",
+        default="DRN-FG-600",
+        help="Finished good SKU to build: DRN-FG-600 (drone) or CASE-FG-500 (transport case).",
     )
     return parser.parse_args()
 
@@ -40,11 +45,11 @@ def main() -> int:
         print("quantity must be greater than zero", file=sys.stderr)
         return 2
 
-    sql = "SELECT create_production_order(%s, %s, %s)"
-    params = [args.order_no, args.quantity, args.due_date]
+    sql = "SELECT create_production_order(%s, %s, %s, p_finished_sku => %s)"
+    params = [args.order_no, args.quantity, args.due_date, args.sku]
     if args.start_date:
-        sql = "SELECT create_production_order(%s, %s, %s, %s)"
-        params.append(args.start_date)
+        sql = "SELECT create_production_order(%s, %s, %s, %s, %s)"
+        params = [args.order_no, args.quantity, args.due_date, args.start_date, args.sku]
 
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:

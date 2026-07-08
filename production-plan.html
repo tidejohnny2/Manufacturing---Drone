@@ -14,7 +14,8 @@
           <h1>Production Plan</h1>
           <p class="bom-intro">
             Prototype build plan for one packaged inspection drone, aligned to the floor stations, BOM, labor,
-            material pull, work script, quality gates, and support needs.
+            material pull, work script, quality gates, and support needs. Includes the case line routing that
+            manufactures drone transport cases into Case Inventory for packaging pull.
           </p>
         </div>
         <div class="bom-actions">
@@ -37,7 +38,11 @@
         </div>
         <div>
           <span>Required flow</span>
-          <strong>9 stations</strong>
+          <strong>9 drone + 8 case stations</strong>
+        </div>
+        <div>
+          <span>Case line labor</span>
+          <strong>108 min</strong>
         </div>
         <div>
           <span>Primary crew</span>
@@ -195,6 +200,111 @@
               <td>Inventory transaction complete and location assigned.</td>
               <td>Barcode scanner, inventory rack, ERP transaction</td>
               <td>Available finished goods inventory</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Case line routing table">
+        <table class="bom-table production-table">
+          <thead>
+            <tr>
+              <th>Seq</th>
+              <th>Station</th>
+              <th>Operation Type</th>
+              <th>Labor</th>
+              <th>Primary Role</th>
+              <th>Material Pull</th>
+              <th>Work Script</th>
+              <th>Quality Gate</th>
+              <th>Tools / Support</th>
+              <th>Output</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>110</td>
+              <td>Case Receiving</td>
+              <td>Logistics</td>
+              <td>20 min</td>
+              <td>Material handler</td>
+              <td>Shell blanks, foam stock, hardware cartons, packing list</td>
+              <td>Receive case materials, inspect for damage, confirm part numbers, release accepted parts.</td>
+              <td>Parts match PO and no damage is visible.</td>
+              <td>Receiving bench, barcode scanner, quarantine bin</td>
+              <td>Accepted case materials for staging</td>
+            </tr>
+            <tr>
+              <td>120</td>
+              <td>Case Staging</td>
+              <td>Material prep</td>
+              <td>12 min</td>
+              <td>Material handler</td>
+              <td>Shell blanks, foam blocks, hinges, latches, handles, seals, fasteners, labels</td>
+              <td>Pull case BOM items, verify quantities, group by station, stage kit at Shell Forming.</td>
+              <td>Kit checklist complete with no missing parts.</td>
+              <td>Kit cart, labeled bins, BOM traveler</td>
+              <td>Complete case build kit</td>
+            </tr>
+            <tr>
+              <td>130</td>
+              <td>Shell Forming</td>
+              <td>Forming</td>
+              <td>25 min</td>
+              <td>Forming operator</td>
+              <td>Molded shell blank set</td>
+              <td>Form and trim shell halves, deburr edges, check hinge and latch mounting surfaces.</td>
+              <td>Shell halves mate square with no trim defects.</td>
+              <td>Trim fixture, deburr tools, go/no-go gauges</td>
+              <td>Trimmed shell set ready for foam</td>
+            </tr>
+            <tr>
+              <td>140</td>
+              <td>Foam Fit</td>
+              <td>Fabrication</td>
+              <td>18 min</td>
+              <td>Fabrication operator</td>
+              <td>Foam insert block set, fit template</td>
+              <td>Cut foam cavities, fit inserts to shell, verify drone, battery, and accessory fit.</td>
+              <td>All cavities hold contents secure with no interference.</td>
+              <td>CNC foam cutter, fit template, knife set</td>
+              <td>Foam fitted case shell</td>
+            </tr>
+            <tr>
+              <td>150</td>
+              <td>Hardware</td>
+              <td>Assembly</td>
+              <td>15 min</td>
+              <td>Mechanical assembler</td>
+              <td>Hinge set, latch set, handle, seal kit, fastener kit</td>
+              <td>Install hinges, latches, handle, and gasket, torque fasteners, check closure action.</td>
+              <td>Latches engage, seal seats, and hinge action is smooth.</td>
+              <td>Torque driver, rivet tool, closure gauge</td>
+              <td>Assembled transport case</td>
+            </tr>
+            <tr>
+              <td>160</td>
+              <td>Inspection</td>
+              <td>Inspection</td>
+              <td>10 min</td>
+              <td>Quality technician</td>
+              <td>Case label and badge set, inspection record</td>
+              <td>Inspect closure, seal, and fit, apply serial and compliance labels, record acceptance.</td>
+              <td>Closure, seal, fit, and labels accepted and recorded.</td>
+              <td>Inspection checklist, label printer, gauge set</td>
+              <td>Accepted labeled case</td>
+            </tr>
+            <tr>
+              <td>170</td>
+              <td>Case Inventory</td>
+              <td>Logistics</td>
+              <td>8 min</td>
+              <td>Inventory clerk</td>
+              <td>Finished case, case traveler</td>
+              <td>Scan finished case, assign storage location, update case stock for drone packaging pull.</td>
+              <td>Inventory transaction complete and location assigned.</td>
+              <td>Barcode scanner, inventory rack, ERP transaction</td>
+              <td>Available case inventory for drone packaging</td>
             </tr>
           </tbody>
         </table>

@@ -12,4 +12,10 @@ Production,Electronics,Drone assembly WIP,DRN-WIP-ELEC,0 each,0 each,0 each,0,3,
 Production,Firmware,Configured drone WIP,DRN-WIP-FW,0 each,0 each,0 each,0,2,Open capacity,Hold firmware version and serial number together
 Production,QA Test,Inspection WIP,DRN-WIP-QA,0 each,0 each,0 each,0,2,Open capacity,QA WIP cannot release without completed test record
 Production,Rework,Rework hold,DRN-WIP-RWK,0 each,0 each,0 each,0,2,Clear,Use only for failed inspection or blocked material disposition
+Parts,Shell Forming,Molded shell blank set,CASE-SHL-001,14 set,1 set,13 set,6,24,Ready,Trim within one shift of molding lot release
+Parts,Foam Fit,Foam insert block set,CASE-FOAM-001,10 set,1 set,9 set,6,20,Ready,Cut cavities against the current drone fit template
+Parts,Hardware,Latch set,CASE-LTC-001,30 each,2 each,28 each,12,48,Ready,Torque latches to spec and check engagement
+Parts,Inspection,Case label and badge set,CASE-LBL-001,16 set,1 set,15 set,8,30,Ready,Apply serial badge after inspection pass
+Production,Shell Forming,Case forming WIP,CASE-WIP-FORM,0 each,0 each,0 each,0,4,Open capacity,Active only while a case order is at shell forming
+Sub-assembly,Case Inventory,Drone transport case,CASE-FG-500,4 each,1 each,3 each,2,16,Ready,Manufactured case stock pulled by drone packaging
 Finished Goods,FG Inventory,Packaged inspection drone,DRN-FG-600,3 each,1 each,2 each,2,12,Ready,Available only after package scan and storage location assignment

@@ -1,6 +1,7 @@
 const orderForm = document.querySelector("#orderForm");
 const orderMessage = document.querySelector("#orderMessage");
 const orderNoInput = document.querySelector("#orderNo");
+const finishedGoodSelect = document.querySelector("#finishedGood");
 const quantityInput = document.querySelector("#quantity");
 const startDateInput = document.querySelector("#startDate");
 const dueDateInput = document.querySelector("#dueDate");
@@ -26,7 +27,15 @@ const balanceNotes = {
   "Workstation 4: Motor/ESC Test + Props": "Receives WIP after firmware and calibration are recorded.",
   "Workstation 5: Final QA + Flight Test": "Receives WIP after motor test and prop install pass.",
   "Finished Goods: Packaged Drones": "Receives accepted unit from QA for carton, label, and documents.",
-  "FG Inventory": "Completed quantity increases when packaged unit is scanned into stock."
+  "FG Inventory": "Completed quantity increases when packaged unit is scanned into stock.",
+  "Case Receiving": "Case material receipt point: order balance waits here for staging release.",
+  "Case Material Staging": "Stages molded shells, foam blocks, and hardware kits for the case order.",
+  "Case WS1: Shell Forming + Trim": "Forms and trims shell halves for the case order.",
+  "Case WS2: Foam Cutting + Fit": "Cuts foam inserts and fits them to the shell cavities.",
+  "Case WS3: Hardware + Assembly": "Installs hinges, latches, handle, seal kit, and fasteners.",
+  "Case WS4: Inspection + Label": "Inspects the finished case and applies serial and compliance labels.",
+  "Case Finished Goods": "Holds accepted cases before stocking into Case Inventory.",
+  "Case Inventory": "Completed cases increase stock available for drone packaging pull."
 };
 
 function titleCase(value) {
@@ -43,7 +52,7 @@ function setMessage(text, isError = false) {
 function updateSqlPreview() {
   sqlPreview.textContent =
     `SELECT create_production_order('${orderNoInput.value}', ${quantityInput.value}, ` +
-    `'${dueDateInput.value}', '${startDateInput.value}');`;
+    `'${dueDateInput.value}', '${startDateInput.value}', '${finishedGoodSelect.value}');`;
 }
 
 function renderSnapshot(snapshot) {
@@ -136,6 +145,7 @@ function renderHistory(history) {
       (order) => `
         <tr class="${order.order_no === selectedOrderNo ? "selected" : ""}" data-order-no="${order.order_no}">
           <td><button type="button" class="order-history-link" data-order-no="${order.order_no}">${order.order_no}</button></td>
+          <td>${order.finished_good ?? ""}</td>
           <td>${titleCase(order.production_status ?? order.status)}</td>
           <td>${order.current_zone}</td>
           <td>${order.percent_complete ?? 0}%</td>
@@ -177,7 +187,7 @@ async function loadLatestOrder() {
   }
 
   const [nextResponse] = await Promise.all([
-    fetch("/api/production-orders/next-number")
+    fetch(`/api/production-orders/next-number?sku=${encodeURIComponent(finishedGoodSelect.value)}`)
   ]);
   const next = await nextResponse.json();
   if (!nextResponse.ok) {
@@ -199,6 +209,7 @@ async function createOrder(event) {
 
   const payload = {
     orderNo: orderNoInput.value,
+    finishedSku: finishedGoodSelect.value,
     quantity: Number(quantityInput.value),
     startDate: startDateInput.value,
     dueDate: dueDateInput.value
@@ -222,7 +233,7 @@ async function createOrder(event) {
 }
 
 async function refreshNextOrderNo() {
-  const response = await fetch("/api/production-orders/next-number");
+  const response = await fetch(`/api/production-orders/next-number?sku=${encodeURIComponent(finishedGoodSelect.value)}`);
   const next = await response.json();
   if (!response.ok) {
     setMessage(next.error ?? "Unable to refresh next order number.", true);
@@ -234,6 +245,10 @@ async function refreshNextOrderNo() {
 
 [quantityInput, startDateInput, dueDateInput].forEach((input) => {
   input.addEventListener("input", updateSqlPreview);
+});
+
+finishedGoodSelect.addEventListener("change", () => {
+  refreshNextOrderNo().catch((error) => setMessage(error.message, true));
 });
 
 orderForm.addEventListener("submit", createOrder);

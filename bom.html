@@ -13,7 +13,8 @@
           <p class="eyebrow">Drone production</p>
           <h1>Bill of Materials</h1>
           <p class="bom-intro">
-            Prototype BOM for one packaged inspection drone, aligned to the manufacturing floor workstations.
+            Prototype BOM for one packaged inspection drone, aligned to the manufacturing floor workstations,
+            plus the drone transport case BOM built on the case production line and pulled from Case Inventory.
           </p>
         </div>
         <div class="bom-actions">
@@ -32,7 +33,11 @@
         </div>
         <div>
           <span>Line items</span>
-          <strong>19</strong>
+          <strong>20</strong>
+        </div>
+        <div>
+          <span>Sub-assembly BOM</span>
+          <strong>CASE-FG-500</strong>
         </div>
         <div>
           <span>Build type</span>
@@ -244,6 +249,144 @@
               <td>QA Test</td>
               <td>Make</td>
               <td>Traceability record from QA release</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-FG-500</td>
+              <td>Drone transport case</td>
+              <td>Packaging</td>
+              <td>1 each</td>
+              <td>Packaged</td>
+              <td>Make</td>
+              <td>Manufactured carry case pulled from Case Inventory at drone packaging</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-summary" aria-label="Case BOM summary">
+        <div>
+          <span>Sub-assembly</span>
+          <strong>CASE-FG-500</strong>
+        </div>
+        <div>
+          <span>Line items</span>
+          <strong>9</strong>
+        </div>
+        <div>
+          <span>Built on</span>
+          <strong>Case line</strong>
+        </div>
+        <div>
+          <span>Stocked at</span>
+          <strong>Case Inventory</strong>
+        </div>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Drone transport case bill of materials table">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Level</th>
+              <th>Part Number</th>
+              <th>Description</th>
+              <th>Category</th>
+              <th>Qty</th>
+              <th>Station</th>
+              <th>Type</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>0</td>
+              <td>CASE-FG-500</td>
+              <td>Drone transport case</td>
+              <td>Finished good</td>
+              <td>1 each</td>
+              <td>Case Inventory</td>
+              <td>Make</td>
+              <td>Top-level manufactured carry case</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-SHL-001</td>
+              <td>Molded shell blank, top and bottom</td>
+              <td>Shell</td>
+              <td>1 set</td>
+              <td>Shell Forming</td>
+              <td>Buy</td>
+              <td>Molded halves trimmed and prepped at shell forming</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-FOAM-001</td>
+              <td>Foam insert block set</td>
+              <td>Interior</td>
+              <td>1 set</td>
+              <td>Foam Fit</td>
+              <td>Buy</td>
+              <td>Cavities cut for drone, batteries, props, and accessories</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-HNG-001</td>
+              <td>Hinge set</td>
+              <td>Hardware</td>
+              <td>1 set</td>
+              <td>Hardware</td>
+              <td>Buy</td>
+              <td>Continuous hinge with pins and screws</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-LTC-001</td>
+              <td>Latch set</td>
+              <td>Hardware</td>
+              <td>2 each</td>
+              <td>Hardware</td>
+              <td>Buy</td>
+              <td>Two locking draw latches per case</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-HDL-001</td>
+              <td>Carry handle</td>
+              <td>Hardware</td>
+              <td>1 each</td>
+              <td>Hardware</td>
+              <td>Buy</td>
+              <td>Spring-loaded carry handle</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-SEAL-001</td>
+              <td>Gasket seal and valve kit</td>
+              <td>Hardware</td>
+              <td>1 set</td>
+              <td>Hardware</td>
+              <td>Buy</td>
+              <td>O-ring gasket and pressure relief valve</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-HW-001</td>
+              <td>Case fastener kit</td>
+              <td>Hardware</td>
+              <td>1 set</td>
+              <td>Hardware</td>
+              <td>Buy</td>
+              <td>Rivets, screws, and inserts for case hardware</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>CASE-LBL-001</td>
+              <td>Case label and badge set</td>
+              <td>Finishing</td>
+              <td>1 set</td>
+              <td>Inspection</td>
+              <td>Buy</td>
+              <td>Serial badge and compliance labels</td>
             </tr>
           </tbody>
         </table>

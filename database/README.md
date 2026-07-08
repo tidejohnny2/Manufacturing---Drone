@@ -1,13 +1,17 @@
 # Manufacturing Floor Database
 
-This folder contains the PostgreSQL schema, seed data, and setup script for the drone manufacturing floor map prototype.
+This folder contains the PostgreSQL schema, seed data, and setup script for the drone manufacturing floor map prototype. It covers two production lines:
+
+- **Facility 1 — Drone floor**: builds packaged inspection drones (`DRN-FG-600`).
+- **Facility 2 — Case line**: manufactures drone transport cases (`CASE-FG-500`) and stocks them into Case Inventory. The drone BOM pulls one case per drone from that stock: the pull is allocated when a drone order is created and consumed when the drone order completes.
 
 ## Files
 
-- `schema.sql` defines the tables.
-- `seed.sql` inserts the drone floor plan, process flow, BOM, inventory, and work orders.
-- `setup_postgres.py` creates the schema, seeds PostgreSQL, and verifies row counts.
+- `schema.sql` defines the tables and the production order functions.
+- `seed.sql` inserts both production lines: floor plans, process flows, BOMs, inventory, and work orders.
+- `setup_postgres.py` creates the schema, seeds PostgreSQL, and verifies row counts and both facility flows.
 - `create_production_order.py` calls PostgreSQL to create a production order from the database function.
+- `migrations/001_case_line_fixup.sql` upgrades a database created before the case line (BOM constraint fixup plus case line seed data). Fresh installs do not need it.
 
 ## Setup
 
@@ -28,14 +32,14 @@ python database/setup_postgres.py
 
 ## Main Tables
 
-- `facilities`: the drone manufacturing floor.
-- `zones`: receiving, kitting, airframe, electronics, firmware, test, QA, packaged goods, and finished goods inventory.
-- `materials`: drone kit, WIP, QA accepted, and finished drone records.
-- `process_steps`: drone movement sequence through build, test, QA, packaging, and rework.
+- `facilities`: the drone manufacturing floor (1) and the case production line (2).
+- `zones`: drone floor zones plus the case line (case receiving, staging, shell forming, foam fit, hardware, inspection, case FG, and case inventory).
+- `materials`: drone and case kits, WIP stages, and finished goods.
+- `process_steps`: per-facility movement sequence; each facility runs its own route.
 - `inventory_balances`: aggregate current quantity by material and zone.
-- `inventory_items`: detailed parts, production WIP, rework hold, and finished goods inventory with on-hand, allocated, available, min/max, and status.
+- `inventory_items`: detailed parts, production WIP, sub-assembly stock (finished cases), rework hold, and finished goods inventory with on-hand, allocated, available, min/max, and status.
 - `work_orders`: sample work orders tied to the process map.
-- `bom_items`: bill of materials lines for one packaged drone.
+- `bom_items`: bill of materials lines per parent (drone BOM and case BOM). Part numbers are unique per parent BOM, and a line with `source_zone_id` set is an inventory pull from that zone: the drone BOM pulls `CASE-FG-500` from `case_inventory` at packaging.
 - `production_orders`: production order header from raw material release to finished goods.
 - `production_order_materials`: BOM requirements, issue quantities, consumption quantities, and shortage status by production order.
 - `production_order_operations`: station routing, labor minutes, quantity in/out, scrap, and operation status.
@@ -47,25 +51,30 @@ python database/setup_postgres.py
 ## Create Production Order
 
 Order numbers are unique in PostgreSQL and indexed by `idx_production_orders_order_no_unique`.
-Use this helper to see the next available number:
+Use this helper to see the next available number (drone orders use the `DRN-PO-` prefix, case orders use `CASE-PO-`):
 
 ```sql
-SELECT next_production_order_no();
+SELECT next_production_order_no();            -- next DRN-PO number
+SELECT next_production_order_no('CASE-PO-');  -- next CASE-PO number
 ```
 
-The schema includes a PostgreSQL function that creates a production order and initializes the material demand, routing operations, workstation balances, and opening ledger records:
+The schema includes a PostgreSQL function that creates a production order and initializes the material demand, routing operations, workstation balances, and opening ledger records. It builds either finished good; the facility and route come from the SKU:
 
 ```sql
 SELECT create_production_order('DRN-PO-1002', 1, '2026-06-14', '2026-06-04');
+SELECT create_production_order('CASE-PO-1002', 2, '2026-06-14', '2026-06-04', 'CASE-FG-500');
 ```
 
-Arguments are `order_no`, `quantity`, `due_date`, and optional `start_date`.
+Arguments are `order_no`, `quantity`, `due_date`, optional `start_date`, and optional `finished_sku` (defaults to `DRN-FG-600`). Creating a drone order also allocates one transport case per drone from Case Inventory; if stock is short the case line shows status `short` instead.
 
 You can also create one from PowerShell after `DATABASE_URL` is set:
 
 ```powershell
 python database/create_production_order.py DRN-PO-1002 1 2026-06-14 --start-date 2026-06-04
+python database/create_production_order.py CASE-PO-1002 2 2026-06-14 --sku CASE-FG-500
 ```
+
+When an order completes on the simulated floor, the server books the finished quantity into stock at the route's final zone (cases into Case Inventory, drones into FG Inventory) and consumes any allocated inventory pulls (the drone order's case).
 
 ## Timing Test Logic
 
@@ -99,7 +108,8 @@ ORDER BY
   CASE area
     WHEN 'Parts' THEN 1
     WHEN 'Production' THEN 2
-    WHEN 'Finished Goods' THEN 3
+    WHEN 'Sub-assembly' THEN 3
+    WHEN 'Finished Goods' THEN 4
   END,
   i.id;
 ```

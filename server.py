@@ -13,6 +13,12 @@ from psycopg.rows import dict_row
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get("DATABASE_URL")
 ACTIVE_STATUSES = ("planned", "released", "in_progress", "hold")
+DEFAULT_FINISHED_SKU = "DRN-FG-600"
+ORDER_PREFIXES = {"DRN-FG-600": "DRN-PO-", "CASE-FG-500": "CASE-PO-"}
+
+
+def order_prefix_for(finished_sku: str) -> str:
+    return ORDER_PREFIXES.get(finished_sku, finished_sku.split("-")[0] + "-PO-")
 
 
 def read_test_total_minutes() -> float | None:
@@ -58,7 +64,7 @@ def require_database_url() -> str:
     return DATABASE_URL
 
 
-def fetch_route_steps(cur) -> list[dict]:
+def fetch_route_steps(cur, facility_id: int = 1) -> list[dict]:
     cur.execute(
         """
         SELECT ps.step_number, ps.source_zone_id, source.name AS source_zone_name,
@@ -66,9 +72,10 @@ def fetch_route_steps(cur) -> list[dict]:
         FROM process_steps ps
         JOIN zones source ON source.id = ps.source_zone_id
         JOIN zones target ON target.id = ps.target_zone_id
-        WHERE ps.facility_id = 1
+        WHERE ps.facility_id = %s
         ORDER BY ps.step_number
-        """
+        """,
+        (facility_id,),
     )
     return cur.fetchall()
 
@@ -156,9 +163,11 @@ def fetch_active_orders(cur) -> list[dict]:
         """
         SELECT po.id, po.order_no, m.sku AS finished_good, po.quantity,
                po.status, po.current_zone_id, z.name AS current_zone,
-               po.start_date, po.due_date, po.created_at
+               po.start_date, po.due_date, po.created_at,
+               fz.facility_id
         FROM production_orders po
         JOIN materials m ON m.id = po.finished_material_id
+        JOIN zones fz ON fz.id = m.default_zone_id
         JOIN zones z ON z.id = po.current_zone_id
         WHERE po.status IN ('planned', 'released', 'in_progress', 'hold')
         ORDER BY po.created_at, po.id
@@ -168,16 +177,16 @@ def fetch_active_orders(cur) -> list[dict]:
 
 
 def build_zone_model(route_steps: list[dict]) -> tuple[list[str], dict, dict, dict]:
-    zone_order = ["receiving"] + [step["target_zone_id"] for step in route_steps]
-    zone_names = {"receiving": "Receiving"}
+    entry_zone_id = route_steps[0]["source_zone_id"]
+    zone_order = [entry_zone_id] + [step["target_zone_id"] for step in route_steps]
+    zone_names = {entry_zone_id: route_steps[0]["source_zone_name"]}
     durations = {}
     standard_durations = {}
 
-    for index, step in enumerate(route_steps):
-        source_zone_id = "receiving" if index == 0 else step["source_zone_id"]
-        zone_names[source_zone_id] = "Receiving" if source_zone_id == "receiving" else step["source_zone_name"]
+    for step in route_steps:
+        zone_names[step["source_zone_id"]] = step["source_zone_name"]
         zone_names[step["target_zone_id"]] = step["target_zone_name"]
-        standard_durations[source_zone_id] = step["expected_minutes"]
+        standard_durations[step["source_zone_id"]] = step["expected_minutes"]
 
     simulation_factor = simulation_factor_for(sum(standard_durations.values()))
     durations = {
@@ -260,11 +269,12 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
         else:
             assigned_index = assigned_index if assigned_index is not None else 0
 
+        final_zone_id = zone_order[-1]
         current_zone_id = "queue"
-        current_zone = "Queued for Receiving"
+        current_zone = f"Queued for {zone_names.get(zone_order[0], zone_order[0])}"
         if status == "complete":
-            current_zone_id = "inventory"
-            current_zone = zone_names.get("inventory", "FG Inventory")
+            current_zone_id = final_zone_id
+            current_zone = zone_names.get(final_zone_id, final_zone_id)
         elif assigned_index is not None:
             current_zone_id = zone_order[assigned_index]
             current_zone = zone_names.get(current_zone_id, current_zone_id)
@@ -313,8 +323,24 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
     return states
 
 
+def simulate_active_states(cur, facility_id: int | None = None) -> list[dict]:
+    """Simulate active orders per facility so each product line runs its own route."""
+    orders = fetch_active_orders(cur)
+    if facility_id is not None:
+        orders = [order for order in orders if order["facility_id"] == facility_id]
+
+    states = []
+    for current_facility_id in sorted({order["facility_id"] for order in orders}):
+        facility_orders = [order for order in orders if order["facility_id"] == current_facility_id]
+        route_steps = fetch_route_steps(cur, current_facility_id)
+        if route_steps:
+            states.extend(simulated_pipeline_state(facility_orders, route_steps))
+    return states
+
+
 def sync_workstation_ledger(cur, order: dict, simulation: dict) -> None:
     reference_base = order["order_no"]
+    final_zone_id = simulation["balances"][-1]["zone_id"]
     for row in simulation["balances"]:
         zone_id = row["zone_id"]
         station = row["station"]
@@ -337,7 +363,7 @@ def sync_workstation_ledger(cur, order: dict, simulation: dict) -> None:
                     f"{station} received production WIP.",
                 ),
             )
-            if zone_id != "inventory":
+            if zone_id != final_zone_id:
                 cur.execute(
                     """
                     INSERT INTO production_workstation_ledger (
@@ -376,18 +402,102 @@ def sync_workstation_ledger(cur, order: dict, simulation: dict) -> None:
             )
 
 
+def post_completion_inventory(cur, order: dict, final_zone_id: str) -> None:
+    """Book a completed order into stock and consume its inventory-pull components."""
+    # Receive the finished quantity into stock at the route's final zone, so
+    # completed case orders raise Case Inventory available for drone packaging pull.
+    cur.execute(
+        """
+        UPDATE inventory_items
+        SET quantity_on_hand = quantity_on_hand + %s, updated_at = now()
+        WHERE location_zone_id = %s AND part_number = %s
+        """,
+        (order["quantity"], final_zone_id, order["finished_good"]),
+    )
+    cur.execute(
+        """
+        INSERT INTO inventory_transactions (
+          production_order_id, transaction_type, to_zone_id, part_number,
+          quantity, unit, reference
+        )
+        VALUES (%s, 'complete', %s, %s, %s, 'each', %s)
+        """,
+        (order["id"], final_zone_id, order["finished_good"], order["quantity"], order["order_no"]),
+    )
+
+    # Consume allocated inventory-pull components (such as transport cases) from stock.
+    cur.execute(
+        """
+        SELECT pom.id, pom.part_number, pom.required_quantity, pom.unit,
+               bi.source_zone_id, bi.station_zone_id
+        FROM production_order_materials pom
+        JOIN bom_items bi ON bi.id = pom.bom_item_id
+        WHERE pom.production_order_id = %s
+          AND bi.source_zone_id IS NOT NULL
+          AND pom.status = 'allocated'
+        """,
+        (order["id"],),
+    )
+    for pull in cur.fetchall():
+        cur.execute(
+            """
+            UPDATE inventory_items
+            SET quantity_on_hand = quantity_on_hand - %s,
+                quantity_allocated = quantity_allocated - %s,
+                updated_at = now()
+            WHERE location_zone_id = %s AND part_number = %s
+            """,
+            (
+                pull["required_quantity"],
+                pull["required_quantity"],
+                pull["source_zone_id"],
+                pull["part_number"],
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE production_order_materials
+            SET status = 'consumed', issued_quantity = required_quantity,
+                consumed_quantity = required_quantity
+            WHERE id = %s
+            """,
+            (pull["id"],),
+        )
+        cur.execute(
+            """
+            INSERT INTO inventory_transactions (
+              production_order_id, transaction_type, from_zone_id, to_zone_id,
+              part_number, quantity, unit, reference
+            )
+            VALUES (%s, 'consume', %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                order["id"],
+                pull["source_zone_id"],
+                pull["station_zone_id"],
+                pull["part_number"],
+                pull["required_quantity"],
+                pull["unit"],
+                order["order_no"],
+            ),
+        )
+
+
 def complete_finished_pipeline_orders(cur, active_states: list[dict]) -> None:
     for state in active_states:
         order = state["order"]
         if order["production_status"] == "complete":
+            final_zone_id = state["balances"][-1]["zone_id"]
             cur.execute(
                 """
                 UPDATE production_orders
-                SET status = 'complete', current_zone_id = 'inventory', updated_at = now()
-                WHERE id = %s
+                SET status = 'complete', current_zone_id = %s, updated_at = now()
+                WHERE id = %s AND status <> 'complete'
                 """,
-                (order["id"],),
+                (final_zone_id, order["id"]),
             )
+            if cur.rowcount:
+                post_completion_inventory(cur, order, final_zone_id)
 
 
 def first_station_is_busy(active_states: list[dict]) -> bool:
@@ -400,14 +510,17 @@ def first_station_is_busy(active_states: list[dict]) -> bool:
     return False
 
 
-def normalize_queued_order(cur, order: dict) -> None:
+def normalize_queued_order(cur, state: dict) -> None:
+    order = state["order"]
+    entry_zone_id = state["balances"][0]["zone_id"]
+    entry_zone_name = state["balances"][0]["station"]
     cur.execute(
         """
         UPDATE production_orders
-        SET status = 'released', current_zone_id = 'receiving', updated_at = now()
+        SET status = 'released', current_zone_id = %s, updated_at = now()
         WHERE id = %s AND status <> 'cancelled'
         """,
-        (order["id"],),
+        (entry_zone_id, order["id"]),
     )
     cur.execute(
         """
@@ -428,19 +541,22 @@ def normalize_queued_order(cur, order: dict) -> None:
     cur.execute(
         """
         UPDATE production_order_activity
-        SET notes = 'Production order created and queued for Receiving until the first workstation is available.'
+        SET notes = %s
         WHERE production_order_id = %s AND activity_type = 'created'
         """,
-        (order["id"],),
+        (
+            f"Production order created and queued for {entry_zone_name} until the first workstation is available.",
+            order["id"],
+        ),
     )
     cur.execute(
         """
         DELETE FROM production_workstation_ledger
         WHERE production_order_id = %s
-          AND zone_id = 'receiving'
+          AND zone_id = %s
           AND accounting_event = 'WIP_RECEIPT'
         """,
-        (order["id"],),
+        (order["id"], entry_zone_id),
     )
 
 
@@ -450,7 +566,7 @@ def sync_order_runtime_status(cur, state: dict) -> None:
         return
 
     db_status = "released" if order["production_status"] == "queued" else "in_progress"
-    zone_id = "receiving" if order["current_zone_id"] == "queue" else order["current_zone_id"]
+    zone_id = state["balances"][0]["zone_id"] if order["current_zone_id"] == "queue" else order["current_zone_id"]
     cur.execute(
         """
         UPDATE production_orders
@@ -464,15 +580,16 @@ def sync_order_runtime_status(cur, state: dict) -> None:
 def fetch_order_snapshot(order_no: str | None = None) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            route_steps = fetch_route_steps(cur)
             if order_no:
                 cur.execute(
                     """
                     SELECT po.id, po.order_no, m.sku AS finished_good, po.quantity,
                            po.status, po.current_zone_id, z.name AS current_zone,
-                           po.start_date, po.due_date, po.created_at
+                           po.start_date, po.due_date, po.created_at,
+                           fz.facility_id
                     FROM production_orders po
                     JOIN materials m ON m.id = po.finished_material_id
+                    JOIN zones fz ON fz.id = m.default_zone_id
                     JOIN zones z ON z.id = po.current_zone_id
                     WHERE po.order_no = %s
                     """,
@@ -484,13 +601,20 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
                 active_orders = fetch_active_orders(cur)
                 if not any(active["id"] == order["id"] for active in active_orders):
                     active_orders.append(order)
-                active_states = simulated_pipeline_state(active_orders, route_steps)
+                active_states = []
+                for facility_id in sorted({active["facility_id"] for active in active_orders}):
+                    facility_orders = [active for active in active_orders if active["facility_id"] == facility_id]
+                    route_steps = fetch_route_steps(cur, facility_id)
+                    if route_steps:
+                        active_states.extend(simulated_pipeline_state(facility_orders, route_steps))
+                if not active_states:
+                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
                 selected_state = next(
                     (state for state in active_states if state["order"]["id"] == order["id"]),
                     active_states[-1],
                 )
             else:
-                active_states = simulated_pipeline_state(fetch_active_orders(cur), route_steps)
+                active_states = simulate_active_states(cur)
                 if not active_states:
                     return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
                 selected_state = next(
@@ -508,7 +632,7 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
             for state in active_states:
                 sync_order_runtime_status(cur, state)
             if order["production_status"] == "queued":
-                normalize_queued_order(cur, order)
+                normalize_queued_order(cur, selected_state)
             else:
                 sync_workstation_ledger(cur, order, {"balances": balances})
             conn.commit()
@@ -561,29 +685,39 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
     }
 
 
-def fetch_next_order_no() -> str:
+def fetch_next_order_no(finished_sku: str = DEFAULT_FINISHED_SKU) -> str:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT next_production_order_no() AS order_no")
+            cur.execute(
+                "SELECT next_production_order_no(%s) AS order_no",
+                (order_prefix_for(finished_sku),),
+            )
             return cur.fetchone()["order_no"]
 
 
-def fetch_floor_dashboard() -> dict:
+def fetch_floor_dashboard(facility_id: int = 1) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            active_states = simulated_pipeline_state(fetch_active_orders(cur), fetch_route_steps(cur))
-            if not active_states:
+            # Simulate every facility so case-line orders keep completing and
+            # posting inventory even when only the drone floor map is open.
+            all_states = simulate_active_states(cur)
+            if not all_states:
                 return {"summary": {"active_orders": 0, "active_quantity": 0}, "zones": []}
 
-            for state in active_states:
+            for state in all_states:
                 sync_order_runtime_status(cur, state)
                 if state["order"]["production_status"] == "queued":
-                    normalize_queued_order(cur, state["order"])
+                    normalize_queued_order(cur, state)
                 else:
                     sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
-            complete_finished_pipeline_orders(cur, active_states)
+            complete_finished_pipeline_orders(cur, all_states)
             conn.commit()
-            active_states = [state for state in active_states if state["order"]["production_status"] != "complete"]
+            active_states = [
+                state
+                for state in all_states
+                if state["order"]["production_status"] != "complete"
+                and state["order"]["facility_id"] == facility_id
+            ]
             if not active_states:
                 return {"summary": {"active_orders": 0, "active_quantity": 0}, "zones": []}
 
@@ -655,12 +789,11 @@ def fetch_floor_dashboard() -> dict:
 def fetch_order_history() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            route_steps = fetch_route_steps(cur)
-            active_states = simulated_pipeline_state(fetch_active_orders(cur), route_steps)
+            active_states = simulate_active_states(cur)
             for state in active_states:
                 sync_order_runtime_status(cur, state)
                 if state["order"]["production_status"] == "queued":
-                    normalize_queued_order(cur, state["order"])
+                    normalize_queued_order(cur, state)
                 else:
                     sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
             complete_finished_pipeline_orders(cur, active_states)
@@ -723,31 +856,38 @@ def create_order(payload: dict) -> dict:
     quantity = int(payload.get("quantity", 0))
     due_date = str(payload.get("dueDate", "")).strip()
     start_date = str(payload.get("startDate", "")).strip()
+    finished_sku = str(payload.get("finishedSku", DEFAULT_FINISHED_SKU)).strip() or DEFAULT_FINISHED_SKU
 
     if not order_no:
-        order_no = fetch_next_order_no()
+        order_no = fetch_next_order_no(finished_sku)
     if quantity <= 0:
         raise ValueError("Quantity must be greater than zero.")
     if not due_date:
         raise ValueError("Due date is required.")
 
-    sql = "SELECT create_production_order(%s, %s, %s) AS order_id"
-    params: list[object] = [order_no, quantity, due_date]
+    sql = "SELECT create_production_order(%s, %s, %s, p_finished_sku => %s) AS order_id"
+    params: list[object] = [order_no, quantity, due_date, finished_sku]
     if start_date:
-        sql = "SELECT create_production_order(%s, %s, %s, %s) AS order_id"
-        params.append(start_date)
+        sql = "SELECT create_production_order(%s, %s, %s, %s, %s) AS order_id"
+        params = [order_no, quantity, due_date, start_date, finished_sku]
 
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            route_steps = fetch_route_steps(cur)
-            active_states = simulated_pipeline_state(fetch_active_orders(cur), route_steps)
+            cur.execute(
+                "SELECT 1 FROM materials WHERE sku = %s AND material_type = 'finished'",
+                (finished_sku,),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"Unknown finished good {finished_sku}.")
+
+            active_states = simulate_active_states(cur)
             complete_finished_pipeline_orders(cur, active_states)
             cur.execute(sql, params)
             order_id = cur.fetchone()["order_id"]
-            active_states = simulated_pipeline_state(fetch_active_orders(cur), route_steps)
+            active_states = simulate_active_states(cur)
             new_state = next((state for state in active_states if state["order"]["id"] == order_id), None)
             if new_state and new_state["order"]["production_status"] == "queued":
-                normalize_queued_order(cur, new_state["order"])
+                normalize_queued_order(cur, new_state)
         conn.commit()
 
     return fetch_order_snapshot(order_no)
@@ -775,13 +915,15 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/production-orders/next-number":
             try:
-                json_response(self, HTTPStatus.OK, {"orderNo": fetch_next_order_no()})
+                finished_sku = query.get("sku", [DEFAULT_FINISHED_SKU])[0] or DEFAULT_FINISHED_SKU
+                json_response(self, HTTPStatus.OK, {"orderNo": fetch_next_order_no(finished_sku)})
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
         if path == "/api/floor-dashboard":
             try:
-                json_response(self, HTTPStatus.OK, fetch_floor_dashboard())
+                facility_id = int(query.get("facility", ["1"])[0])
+                json_response(self, HTTPStatus.OK, fetch_floor_dashboard(facility_id))
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
@@ -801,6 +943,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except psycopg.errors.UniqueViolation:
             json_response(self, HTTPStatus.CONFLICT, {"error": "That production order already exists."})
+        except psycopg.errors.RaiseException as exc:
+            json_response(self, HTTPStatus.BAD_REQUEST, {"error": exc.diag.message_primary or str(exc)})
         except Exception as exc:
             json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 

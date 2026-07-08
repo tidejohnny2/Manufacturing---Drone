@@ -11,33 +11,44 @@ except ImportError as exc:
 
 
 EXPECTED_COUNTS = {
-    "facilities": 1,
-    "zones": 9,
-    "materials": 6,
-    "process_steps": 8,
-    "inventory_balances": 6,
-    "inventory_items": 14,
+    "facilities": 2,
+    "zones": 17,
+    "materials": 11,
+    "process_steps": 15,
+    "inventory_balances": 8,
+    "inventory_items": 20,
     "work_orders": 4,
-    "bom_items": 19,
-    "production_orders": 1,
-    "production_order_materials": 18,
-    "production_order_operations": 8,
-    "workstation_balances": 9,
-    "production_order_activity": 1,
-    "inventory_transactions": 1,
-    "production_workstation_ledger": 1,
+    "bom_items": 29,
+    "production_orders": 2,
+    "production_order_materials": 27,
+    "production_order_operations": 15,
+    "workstation_balances": 17,
+    "production_order_activity": 2,
+    "inventory_transactions": 3,
+    "production_workstation_ledger": 2,
 }
 
-EXPECTED_FLOW = [
-    ("receiving", "raw"),
-    ("raw", "ws1"),
-    ("ws1", "ws2"),
-    ("ws2", "ws3"),
-    ("ws3", "ws4"),
-    ("ws4", "ws5"),
-    ("ws5", "fg"),
-    ("fg", "inventory"),
-]
+EXPECTED_FLOWS = {
+    1: [
+        ("receiving", "raw"),
+        ("raw", "ws1"),
+        ("ws1", "ws2"),
+        ("ws2", "ws3"),
+        ("ws3", "ws4"),
+        ("ws4", "ws5"),
+        ("ws5", "fg"),
+        ("fg", "inventory"),
+    ],
+    2: [
+        ("case_receiving", "case_raw"),
+        ("case_raw", "cws1"),
+        ("cws1", "cws2"),
+        ("cws2", "cws3"),
+        ("cws3", "cws4"),
+        ("cws4", "case_fg"),
+        ("case_fg", "case_inventory"),
+    ],
+}
 
 
 def read_sql(path: Path) -> str:
@@ -77,22 +88,25 @@ def verify_counts(conn: psycopg.Connection) -> None:
 
 
 def verify_flow(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT source_zone_id, target_zone_id
-            FROM process_steps
-            ORDER BY step_number
-            """
-        )
-        actual = cur.fetchall()
+    for facility_id, expected_flow in EXPECTED_FLOWS.items():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source_zone_id, target_zone_id
+                FROM process_steps
+                WHERE facility_id = %s
+                ORDER BY step_number
+                """,
+                (facility_id,),
+            )
+            actual = cur.fetchall()
 
-    if actual != EXPECTED_FLOW:
-        raise RuntimeError(f"Unexpected process flow: {actual}")
+        if actual != expected_flow:
+            raise RuntimeError(f"Unexpected facility {facility_id} process flow: {actual}")
 
-    print("Flow:")
-    for index, (source, target) in enumerate(actual, start=1):
-        print(f"{index}. {source} -> {target}")
+        print(f"Facility {facility_id} flow:")
+        for index, (source, target) in enumerate(actual, start=1):
+            print(f"{index}. {source} -> {target}")
 
 
 def main() -> int:

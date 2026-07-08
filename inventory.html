@@ -13,8 +13,9 @@
           <p class="eyebrow">Drone production</p>
           <h1>Inventory Plan</h1>
           <p class="bom-intro">
-            Inventory view for drone parts, production WIP, and finished goods areas. This defines what each area
-            controls, where material sits, and what should trigger replenishment or review.
+            Inventory view for drone parts, production WIP, manufactured sub-assemblies, and finished goods areas.
+            This defines what each area controls, where material sits, and what should trigger replenishment or
+            review. Case Inventory stocks finished transport cases from the case line for drone packaging pull.
           </p>
         </div>
         <div class="bom-actions">
@@ -29,11 +30,15 @@
       <section class="bom-summary production-summary" aria-label="Inventory summary">
         <div>
           <span>Parts inventory</span>
-          <strong>17 SKUs</strong>
+          <strong>12 SKUs</strong>
         </div>
         <div>
           <span>WIP Balances</span>
-          <strong>8 locations</strong>
+          <strong>6 locations</strong>
+        </div>
+        <div>
+          <span>Sub-assembly stock</span>
+          <strong>1 case SKU</strong>
         </div>
         <div>
           <span>FG inventory</span>
@@ -57,6 +62,11 @@
             <span>Production</span>
             <strong>Station WIP</strong>
             <p>Partially built drones move through Airframe, Electronics, Firmware, Motor Test, QA, and Packaged.</p>
+          </article>
+          <article>
+            <span>Sub-assembly</span>
+            <strong>Case Inventory</strong>
+            <p>Finished transport cases from the case line are stocked here and pulled by drone packaging.</p>
           </article>
           <article>
             <span>Finished goods</span>
@@ -257,6 +267,84 @@
               <td>2</td>
               <td>Clear</td>
               <td>Use only for failed inspection or blocked material disposition.</td>
+            </tr>
+            <tr>
+              <td>Parts</td>
+              <td>Shell Forming</td>
+              <td>Molded shell blank set</td>
+              <td>CASE-SHL-001</td>
+              <td>14 set</td>
+              <td>1 set</td>
+              <td>13 set</td>
+              <td>6</td>
+              <td>24</td>
+              <td>Ready</td>
+              <td>Trim within one shift of molding lot release.</td>
+            </tr>
+            <tr>
+              <td>Parts</td>
+              <td>Foam Fit</td>
+              <td>Foam insert block set</td>
+              <td>CASE-FOAM-001</td>
+              <td>10 set</td>
+              <td>1 set</td>
+              <td>9 set</td>
+              <td>6</td>
+              <td>20</td>
+              <td>Ready</td>
+              <td>Cut cavities against the current drone fit template.</td>
+            </tr>
+            <tr>
+              <td>Parts</td>
+              <td>Hardware</td>
+              <td>Latch set</td>
+              <td>CASE-LTC-001</td>
+              <td>30 each</td>
+              <td>2 each</td>
+              <td>28 each</td>
+              <td>12</td>
+              <td>48</td>
+              <td>Ready</td>
+              <td>Torque latches to spec and check engagement.</td>
+            </tr>
+            <tr>
+              <td>Parts</td>
+              <td>Inspection</td>
+              <td>Case label and badge set</td>
+              <td>CASE-LBL-001</td>
+              <td>16 set</td>
+              <td>1 set</td>
+              <td>15 set</td>
+              <td>8</td>
+              <td>30</td>
+              <td>Ready</td>
+              <td>Apply serial badge after inspection pass.</td>
+            </tr>
+            <tr>
+              <td>Production</td>
+              <td>Shell Forming</td>
+              <td>Case forming WIP</td>
+              <td>CASE-WIP-FORM</td>
+              <td>0 each</td>
+              <td>0 each</td>
+              <td>0 each</td>
+              <td>0</td>
+              <td>4</td>
+              <td>Open capacity</td>
+              <td>Active only while a case order is at shell forming.</td>
+            </tr>
+            <tr>
+              <td>Sub-assembly</td>
+              <td>Case Inventory</td>
+              <td>Drone transport case</td>
+              <td>CASE-FG-500</td>
+              <td>4 each</td>
+              <td>1 each</td>
+              <td>3 each</td>
+              <td>2</td>
+              <td>16</td>
+              <td>Ready</td>
+              <td>Manufactured case stock pulled by drone packaging.</td>
             </tr>
             <tr>
               <td>Finished Goods</td>

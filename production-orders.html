@@ -13,8 +13,9 @@
           <p class="eyebrow">Drone production</p>
           <h1>Production Orders</h1>
           <p class="bom-intro">
-            Create and track drone production orders from raw material release through workstation WIP, activity,
-            finished goods completion, and inventory balance updates.
+            Create and track drone and transport case production orders from raw material release through
+            workstation WIP, activity, finished goods completion, and inventory balance updates. Completed
+            cases stock Case Inventory, and drone orders pull a case from that stock at packaging.
           </p>
         </div>
         <div class="bom-actions">
@@ -35,7 +36,10 @@
             </label>
             <label>
               <span>Finished Good</span>
-              <input id="finishedGood" type="text" value="DRN-FG-600" readonly />
+              <select id="finishedGood">
+                <option value="DRN-FG-600" selected>DRN-FG-600 — Drone</option>
+                <option value="CASE-FG-500">CASE-FG-500 — Transport Case</option>
+              </select>
             </label>
             <label>
               <span>Quantity</span>
@@ -87,6 +91,7 @@
           <thead>
             <tr>
               <th>Order No.</th>
+              <th>Item</th>
               <th>Status</th>
               <th>Current Station</th>
               <th>Progress</th>
