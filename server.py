@@ -2384,7 +2384,20 @@ def post_completion_costing(cur, order, costing, card) -> None:
         )
 
     wip_std, rm_actual, sub_std, ppv = dm_issue_amounts(card, quantity)
-    fg_amount = round(wip_std + dl_applied + oh_applied, 2)
+    # Transfer exactly what was absorbed into WIP for this order (the posted
+    # ledger, not a recomputed card), so WIP zeroes to the penny even if a
+    # standard was edited while the order was in flight.
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0) AS wip_balance
+        FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        WHERE e.production_order_id = %s AND l.account_no = %s
+        """,
+        (order["id"], WIP_ACCOUNT),
+    )
+    posted_wip = round(float(cur.fetchone()["wip_balance"]), 2)
+    fg_amount = posted_wip if posted_wip > 0 else round(wip_std + dl_applied + oh_applied, 2)
     stock_account = FG_ACCOUNT if order["finished_good"] == "DRN-FG-600" else SUBASSY_ACCOUNT
     post_cost_entry(
         cur, f"PO{order['id']}-FG", order["id"], order["order_no"], "fg_transfer",
