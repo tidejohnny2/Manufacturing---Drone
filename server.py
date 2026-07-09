@@ -6,7 +6,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2597,17 +2597,50 @@ def fetch_variance_report() -> dict:
     return {"orders": orders, "totals": totals}
 
 
-def fetch_cost_ledger(order_no: str | None, limit: int) -> dict:
+def _ledger_date(value: str | None, label: str) -> str | None:
+    if not value:
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{label} must be a YYYY-MM-DD date.") from None
+    return value
+
+
+def fetch_cost_ledger(
+    order_no: str | None,
+    limit: int,
+    before_id: int | None = None,
+    event_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    date_from = _ledger_date(date_from, "dateFrom")
+    date_to = _ledger_date(date_to, "dateTo")
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if not costing_ready(cur):
                 raise ValueError("Costing tables are not installed yet.")
+            clauses: list[str] = []
             params: list[object] = []
-            where = ""
             if order_no:
-                where = "WHERE e.order_no = %s"
+                clauses.append("e.order_no = %s")
                 params.append(order_no)
-            params.append(limit)
+            if event_type:
+                clauses.append("e.event_type = %s")
+                params.append(event_type)
+            if date_from:
+                clauses.append("e.posted_at >= %s::date")
+                params.append(date_from)
+            if date_to:
+                clauses.append("e.posted_at < %s::date + 1")
+                params.append(date_to)
+            if before_id is not None:
+                clauses.append("e.id < %s")
+                params.append(before_id)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            # Fetch one extra row to learn whether older entries remain.
+            params.append(limit + 1)
             cur.execute(
                 f"""
                 SELECT e.id, e.event_ref, e.order_no, e.event_type, e.memo, e.posted_at
@@ -2619,6 +2652,8 @@ def fetch_cost_ledger(order_no: str | None, limit: int) -> dict:
                 params,
             )
             entries = cur.fetchall()
+            has_more = len(entries) > limit
+            entries = entries[:limit]
             entry_ids = [entry["id"] for entry in entries]
             lines_by_entry: dict[int, list] = {}
             if entry_ids:
@@ -2636,7 +2671,9 @@ def fetch_cost_ledger(order_no: str | None, limit: int) -> dict:
                     lines_by_entry.setdefault(line["entry_id"], []).append(line)
             for entry in entries:
                 entry["lines"] = lines_by_entry.get(entry["id"], [])
-    return {"entries": entries}
+            cur.execute("SELECT DISTINCT event_type FROM cost_entries ORDER BY event_type")
+            event_types = [row["event_type"] for row in cur.fetchall()]
+    return {"entries": entries, "has_more": has_more, "event_types": event_types}
 
 
 def fetch_trial_balance() -> dict:
@@ -4500,7 +4537,15 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 elif path == "/api/costing/ledger":
                     order_no = query.get("orderNo", [None])[0]
                     limit = min(max(int(query.get("limit", ["30"])[0]), 1), 200)
-                    payload = fetch_cost_ledger(order_no, limit)
+                    before_raw = query.get("beforeId", [None])[0]
+                    payload = fetch_cost_ledger(
+                        order_no,
+                        limit,
+                        before_id=int(before_raw) if before_raw else None,
+                        event_type=query.get("eventType", [None])[0],
+                        date_from=query.get("dateFrom", [None])[0],
+                        date_to=query.get("dateTo", [None])[0],
+                    )
                 elif path == "/api/costing/trial-balance":
                     payload = fetch_trial_balance()
                 elif path == "/api/costing/accounts":

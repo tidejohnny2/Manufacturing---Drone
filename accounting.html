@@ -78,7 +78,15 @@
       <section class="plan-band" aria-label="Cost journal">
         <div class="kit-head">
           <h2>Cost Journal (Audit Trail)</h2>
-          <input id="journalFilter" type="text" placeholder="Filter by order no…" class="journal-filter" />
+          <div class="journal-controls">
+            <select id="journalType" aria-label="Entry type">
+              <option value="">All types</option>
+            </select>
+            <input id="journalFrom" type="date" aria-label="Posted from (UTC)" title="Posted from (UTC)" />
+            <input id="journalTo" type="date" aria-label="Posted to (UTC)" title="Posted to (UTC)" />
+            <input id="journalFilter" type="text" placeholder="Order / invoice no…" class="journal-filter" />
+            <button type="button" id="journalClear" class="journal-clear">Clear</button>
+          </div>
         </div>
         <div class="bom-table-wrap">
           <table class="bom-table journal-table">
@@ -87,6 +95,10 @@
             </thead>
             <tbody id="journalBody"></tbody>
           </table>
+        </div>
+        <div class="journal-more">
+          <button type="button" id="journalOlder" class="fill-to-max" hidden>Load older entries</button>
+          <span id="journalCount" class="kit-note"></span>
         </div>
       </section>
 
