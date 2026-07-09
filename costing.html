@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Standard Costing</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="bom-shell">
+      <header class="bom-header">
+        <div>
+          <p class="eyebrow">Plant accounting</p>
+          <h1>Standard Costing</h1>
+          <p class="bom-intro">
+            Standard absorption costing across raw materials, WIP, and finished goods: materials issue to
+            WIP at standard with PPV recognized at issue, conversion absorbs by station as work completes,
+            finished stock transfers at standard, and labor and overhead variances post at completion —
+            all on an immutable double-entry cost ledger with control tie-outs.
+          </p>
+        </div>
+        <div class="bom-actions">
+          <a class="nav-link" href="overview.html">Overview</a>
+          <a class="nav-link" href="index.html">Drone Floor</a>
+          <a class="nav-link" href="case-floor.html">Case Floor</a>
+          <a class="nav-link" href="schedule.html">Schedule</a>
+          <a class="nav-link" href="production-orders.html">Orders</a>
+          <a class="nav-link" href="production-plan.html">Plan</a>
+          <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
+        </div>
+      </header>
+
+      <section class="bom-summary production-summary" aria-label="Costing summary">
+        <div>
+          <span>Drone standard cost / unit</span>
+          <strong id="sumDroneStd">—</strong>
+        </div>
+        <div>
+          <span>Case standard cost / unit</span>
+          <strong id="sumCaseStd">—</strong>
+        </div>
+        <div>
+          <span>GL Work in Process</span>
+          <strong id="sumWip">—</strong>
+        </div>
+        <div>
+          <span>Total variance to date</span>
+          <strong id="sumVariance">—</strong>
+        </div>
+        <div>
+          <span>Controls</span>
+          <strong id="sumControls">—</strong>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Standard cost cards">
+        <h2>Standard Cost Cards</h2>
+        <div class="cost-cards" id="costCards"><p>Loading cost cards…</p></div>
+      </section>
+
+      <section class="plan-band" aria-label="WIP valuation">
+        <div class="kit-head">
+          <h2>WIP Valuation (Live)</h2>
+          <span id="wipTie" class="kit-verdict"></span>
+        </div>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Order</th>
+                <th>Item</th>
+                <th>Qty</th>
+                <th>Status</th>
+                <th>Stations Done</th>
+                <th>DM Absorbed</th>
+                <th>Conversion Absorbed</th>
+                <th>WIP Value</th>
+                <th>Std at Completion</th>
+              </tr>
+            </thead>
+            <tbody id="wipBody">
+              <tr><td colspan="9">Nothing in process.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Variance report">
+        <h2>Variance Report (Completed Orders)</h2>
+        <p class="kit-note">Positive = unfavorable (debit); (parentheses) = favorable.</p>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Order</th>
+                <th>Item</th>
+                <th>Qty</th>
+                <th>Std Cost</th>
+                <th>Actual Cost</th>
+                <th>PPV</th>
+                <th>Labor Rate</th>
+                <th>Labor Efficiency</th>
+                <th>OH Absorption</th>
+                <th>Total Variance</th>
+              </tr>
+            </thead>
+            <tbody id="varianceBody">
+              <tr><td colspan="10">Variances appear as orders complete.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Trial balance and controls">
+        <h2>Trial Balance &amp; Controls</h2>
+        <div class="tb-grid">
+          <div class="bom-table-wrap">
+            <table class="bom-table">
+              <thead>
+                <tr><th>Acct</th><th>Account</th><th>Debits</th><th>Credits</th><th>Balance</th></tr>
+              </thead>
+              <tbody id="tbBody"></tbody>
+            </table>
+          </div>
+          <div>
+            <ul class="control-list" id="controlList"></ul>
+            <p class="kit-note" id="tbNote"></p>
+          </div>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Cost journal">
+        <div class="kit-head">
+          <h2>Cost Journal (Audit Trail)</h2>
+          <input id="journalFilter" type="text" placeholder="Filter by order no…" class="journal-filter" />
+        </div>
+        <div class="bom-table-wrap">
+          <table class="bom-table journal-table">
+            <thead>
+              <tr><th>Posted</th><th>Ref</th><th>Type</th><th>Order</th><th>Account</th><th>Debit</th><th>Credit</th></tr>
+            </thead>
+            <tbody id="journalBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Standards and rates">
+        <div class="kit-head">
+          <h2>Standards &amp; Rates</h2>
+          <label class="actor-label">Changed by
+            <input id="standardsActor" type="text" value="controller" maxlength="60" />
+          </label>
+          <span id="standardsMsg" class="kit-verdict"></span>
+        </div>
+        <p class="kit-note">
+          Edits reprice future postings only — posted journal entries are immutable. Every change is
+          recorded in the audit trail below.
+        </p>
+        <div class="tb-grid">
+          <div class="bom-table-wrap">
+            <table class="bom-table">
+              <thead>
+                <tr><th>Part</th><th>Description</th><th>Standard $</th><th>Actual $</th><th></th></tr>
+              </thead>
+              <tbody id="materialsBody"></tbody>
+            </table>
+          </div>
+          <div class="bom-table-wrap">
+            <table class="bom-table">
+              <thead>
+                <tr><th>Role</th><th>Standard $/hr</th><th>Actual $/hr</th><th></th></tr>
+              </thead>
+              <tbody id="ratesBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <h3 class="labor-line-title">Standards Change Audit</h3>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr><th>When</th><th>By</th><th>Type</th><th>Item</th><th>Field</th><th>Old</th><th>New</th></tr>
+            </thead>
+            <tbody id="auditBody">
+              <tr><td colspan="7">No standards changes recorded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="theme.js"></script>
+    <script src="costing.js"></script>
+  </body>
+</html>

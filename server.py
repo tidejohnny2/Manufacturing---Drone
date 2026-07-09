@@ -705,6 +705,10 @@ def post_completion_inventory(cur, order: dict, final_zone_id: str) -> None:
 
 
 def complete_finished_pipeline_orders(cur, active_states: list[dict]) -> None:
+    # Standard costing keeps pace with production: DM issues and station
+    # conversion post for in-flight orders on every poll, and completion
+    # closes each order's costing (variances + FG transfer) exactly once.
+    costing, cards = sync_costing(cur, active_states)
     for state in active_states:
         order = state["order"]
         if order["production_status"] == "complete":
@@ -719,6 +723,11 @@ def complete_finished_pipeline_orders(cur, active_states: list[dict]) -> None:
             )
             if cur.rowcount:
                 post_completion_inventory(cur, order, final_zone_id)
+                if costing:
+                    sku = order["finished_good"]
+                    if sku not in cards:
+                        cards[sku] = cost_card(cur, costing, sku)
+                    post_completion_costing(cur, order, costing, cards[sku])
 
 
 def first_station_is_busy(active_states: list[dict]) -> bool:
@@ -2042,6 +2051,762 @@ def record_station_signoff(payload: dict) -> dict:
     return {"zoneId": zone_id, "recorded": True, "signoffs": signoffs}
 
 
+# ===== Standard absorption costing =====
+# RM carried at actual (PPV recognized at issue), WIP and finished stock at
+# standard. Conversion absorbs by station as work completes; labor rate,
+# labor efficiency, and overhead absorption variances post at completion.
+
+RM_ACCOUNT = "1310"
+SUBASSY_ACCOUNT = "1315"
+WIP_ACCOUNT = "1320"
+FG_ACCOUNT = "1330"
+PAYROLL_ACCOUNT = "2110"
+OH_ACCOUNT = "2120"
+OPENING_ACCOUNT = "3000"
+
+
+def costing_ready(cur) -> bool:
+    cur.execute("SELECT to_regclass('cost_entries') AS reg")
+    return cur.fetchone()["reg"] is not None
+
+
+def load_plan_map() -> dict:
+    plan_path = BASE_DIR / "production-plan.csv"
+    if not plan_path.exists():
+        return {}
+    with open(plan_path, newline="", encoding="utf-8") as plan_file:
+        return {row["station"]: row for row in csv.DictReader(plan_file)}
+
+
+def load_costing(cur) -> dict | None:
+    if not costing_ready(cur):
+        return None
+    cur.execute("SELECT part_number, standard_cost, actual_cost FROM standard_costs")
+    parts = {
+        row["part_number"]: {"standard": float(row["standard_cost"]), "actual": float(row["actual_cost"])}
+        for row in cur.fetchall()
+    }
+    cur.execute("SELECT role, standard_rate, actual_rate FROM labor_rates")
+    rates = {
+        row["role"]: {"standard": float(row["standard_rate"]), "actual": float(row["actual_rate"])}
+        for row in cur.fetchall()
+    }
+    cur.execute("SELECT COALESCE(SUM(pct), 0) AS pct FROM labor_overheads")
+    oh_pct = float(cur.fetchone()["pct"]) / 100
+    return {"parts": parts, "rates": rates, "oh_pct": oh_pct, "plan": load_plan_map()}
+
+
+def cost_card(cur, costing, sku, _depth=0) -> dict:
+    """Standard cost build-up per unit: DM at standard (make components at
+    their own card cost), DL from plan labor minutes x role standard rates,
+    OH applied as the overhead percentage of DL."""
+    finished = resolve_finished_good(cur, sku)
+    cur.execute(
+        """
+        SELECT bi.part_number, bi.description, bi.quantity, bi.unit,
+               m.material_type AS component_type
+        FROM bom_items bi
+        LEFT JOIN materials m ON m.sku = bi.part_number AND m.material_type = 'finished'
+        WHERE bi.parent_material_id = %s AND bi.part_number <> %s
+        ORDER BY bi.id
+        """,
+        (finished["material_id"], sku),
+    )
+    dm_lines = []
+    for row in cur.fetchall():
+        bom_qty = float(row["quantity"])
+        if row["component_type"] == "finished" and _depth == 0:
+            sub_card = cost_card(cur, costing, row["part_number"], _depth=1)
+            unit_std = sub_card["unit_std"]
+            unit_actual = sub_card["unit_std"]  # make items transfer at standard
+            source = "make"
+        else:
+            price = costing["parts"].get(row["part_number"], {"standard": 0.0, "actual": 0.0})
+            unit_std = price["standard"]
+            unit_actual = price["actual"]
+            source = "buy"
+        dm_lines.append(
+            {
+                "part_number": row["part_number"],
+                "description": row["description"],
+                "quantity": bom_qty,
+                "unit": row["unit"],
+                "source": source,
+                "unit_std": round(unit_std, 2),
+                "unit_actual": round(unit_actual, 2),
+                "ext_std": round(unit_std * bom_qty, 2),
+                "ext_actual": round(unit_actual * bom_qty, 2),
+            }
+        )
+    dm_std = round(sum(line["ext_std"] for line in dm_lines), 2)
+
+    route_steps = fetch_route_steps(cur, finished["facility_id"])
+    zone_order = [route_steps[0]["source_zone_id"]] + [step["target_zone_id"] for step in route_steps]
+    labor_lines = []
+    for zone_id in zone_order:
+        plan = costing["plan"].get(PLAN_STATION_BY_ZONE.get(zone_id, ""))
+        if not plan:
+            continue
+        minutes = float(plan["labor_minutes"])
+        role = plan["primary_role"]
+        rate = costing["rates"].get(role, {"standard": 0.0, "actual": 0.0})
+        labor_lines.append(
+            {
+                "zone_id": zone_id,
+                "station": plan["station"],
+                "role": role,
+                "minutes": minutes,
+                "rate_std": rate["standard"],
+                "rate_actual": rate["actual"],
+                "cost_std": round(minutes * rate["standard"] / 60, 2),
+            }
+        )
+    dl_std = round(sum(line["cost_std"] for line in labor_lines), 2)
+    oh_std = round(dl_std * costing["oh_pct"], 2)
+    return {
+        "sku": sku,
+        "facility_id": finished["facility_id"],
+        "dm_lines": dm_lines,
+        "dm_std": dm_std,
+        "labor_lines": labor_lines,
+        "dl_std": dl_std,
+        "oh_pct": round(costing["oh_pct"] * 100, 1),
+        "oh_std": oh_std,
+        "unit_std": round(dm_std + dl_std + oh_std, 2),
+    }
+
+
+def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines) -> bool:
+    """Insert one balanced double-entry journal entry; idempotent by event_ref."""
+    lines = [
+        (account, round(debit, 2), round(credit, 2))
+        for account, debit, credit in lines
+        if round(debit, 2) > 0 or round(credit, 2) > 0
+    ]
+    if not lines:
+        return False
+    total_debit = round(sum(line[1] for line in lines), 2)
+    total_credit = round(sum(line[2] for line in lines), 2)
+    if abs(total_debit - total_credit) > 0.005:
+        raise RuntimeError(
+            f"Unbalanced cost entry {event_ref}: DR {total_debit} vs CR {total_credit}"
+        )
+    cur.execute(
+        """
+        INSERT INTO cost_entries (event_ref, production_order_id, order_no, event_type, memo)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (event_ref) DO NOTHING
+        RETURNING id
+        """,
+        (event_ref, order_id, order_no, event_type, memo),
+    )
+    inserted = cur.fetchone()
+    if not inserted:
+        return False
+    for account, debit, credit in lines:
+        cur.execute(
+            "INSERT INTO cost_lines (entry_id, account_no, debit, credit) VALUES (%s, %s, %s, %s)",
+            (inserted["id"], account, debit, credit),
+        )
+    return True
+
+
+def dm_issue_amounts(card, quantity) -> tuple[float, float, float, float]:
+    """(WIP debit at std, RM credit at actual, subassembly credit at std, PPV)."""
+    wip_std = round(card["dm_std"] * quantity, 2)
+    rm_actual = round(
+        sum(line["ext_actual"] for line in card["dm_lines"] if line["source"] == "buy") * quantity, 2
+    )
+    sub_std = round(
+        sum(line["ext_std"] for line in card["dm_lines"] if line["source"] == "make") * quantity, 2
+    )
+    ppv = round(rm_actual + sub_std - wip_std, 2)
+    return wip_std, rm_actual, sub_std, ppv
+
+
+def station_conversion(card, costing, quantity) -> list[dict]:
+    """Per-station standard conversion cost (DL + OH applied) for an order."""
+    rows = []
+    for labor in card["labor_lines"]:
+        dl = round(labor["minutes"] * quantity * labor["rate_std"] / 60, 2)
+        oh = round(dl * costing["oh_pct"], 2)
+        rows.append({"zone_id": labor["zone_id"], "station": labor["station"], "dl": dl, "oh": oh})
+    return rows
+
+
+def ensure_opening_entry(cur, costing) -> None:
+    """Book opening inventory once: RM at actual, cases and drones at standard."""
+    cur.execute("SELECT 1 FROM cost_entries WHERE event_ref = 'OPENING-BAL'")
+    if cur.fetchone():
+        return
+    cur.execute(
+        "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+    )
+    stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+    rm_value = round(
+        sum(qty * costing["parts"][part]["actual"] for part, qty in stock.items() if part in costing["parts"]), 2
+    )
+    case_std = cost_card(cur, costing, "CASE-FG-500")["unit_std"]
+    drone_std = cost_card(cur, costing, "DRN-FG-600")["unit_std"]
+    case_value = round(stock.get("CASE-FG-500", 0) * case_std, 2)
+    drone_value = round(stock.get("DRN-FG-600", 0) * drone_std, 2)
+    total = round(rm_value + case_value + drone_value, 2)
+    if total <= 0:
+        return
+    post_cost_entry(
+        cur,
+        "OPENING-BAL",
+        None,
+        None,
+        "opening",
+        "Opening inventory balances at first costing run (RM at actual, stock at standard)",
+        [
+            (RM_ACCOUNT, rm_value, 0),
+            (SUBASSY_ACCOUNT, case_value, 0),
+            (FG_ACCOUNT, drone_value, 0),
+            (OPENING_ACCOUNT, 0, total),
+        ],
+    )
+
+
+def sync_costing(cur, states) -> tuple[dict | None, dict]:
+    """Post journal entries for the current production state: opening balances
+    once, DM issue when an order starts, and conversion cost as stations
+    complete. Idempotent via event_ref. Returns (costing, cards) for reuse."""
+    costing = load_costing(cur)
+    if costing is None:
+        return None, {}
+    ensure_opening_entry(cur, costing)
+
+    cards = {}
+    order_ids = [state["order"]["id"] for state in states if state["order"]["id"] and state["order"]["id"] > 0]
+    posted = set()
+    if order_ids:
+        cur.execute(
+            "SELECT event_ref FROM cost_entries WHERE production_order_id = ANY(%s)", (order_ids,)
+        )
+        posted = {row["event_ref"] for row in cur.fetchall()}
+
+    for state in states:
+        order = state["order"]
+        if not order["id"] or order["id"] < 0 or order["production_status"] == "queued":
+            continue
+        sku = order["finished_good"]
+        if sku not in cards:
+            cards[sku] = cost_card(cur, costing, sku)
+        card = cards[sku]
+        quantity = order["quantity"]
+
+        dm_ref = f"PO{order['id']}-DM"
+        if dm_ref not in posted:
+            wip_std, rm_actual, sub_std, ppv = dm_issue_amounts(card, quantity)
+            lines = [(WIP_ACCOUNT, wip_std, 0), (RM_ACCOUNT, 0, rm_actual)]
+            if sub_std:
+                lines.append((SUBASSY_ACCOUNT, 0, sub_std))
+            if ppv > 0:
+                lines.append(("5210", ppv, 0))
+            elif ppv < 0:
+                lines.append(("5210", 0, -ppv))
+            post_cost_entry(
+                cur, dm_ref, order["id"], order["order_no"], "dm_issue",
+                f"Materials issued to WIP at standard for {order['order_no']} (PPV recognized at issue)",
+                lines,
+            )
+
+        completed_zones = {
+            row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+        }
+        for conv in station_conversion(card, costing, quantity):
+            if conv["zone_id"] not in completed_zones:
+                continue
+            conv_ref = f"PO{order['id']}-{conv['zone_id']}-CONV"
+            if conv_ref in posted:
+                continue
+            post_cost_entry(
+                cur, conv_ref, order["id"], order["order_no"], "conversion",
+                f"{conv['station']} conversion absorbed at standard for {order['order_no']}",
+                [
+                    (WIP_ACCOUNT, round(conv["dl"] + conv["oh"], 2), 0),
+                    (PAYROLL_ACCOUNT, 0, conv["dl"]),
+                    (OH_ACCOUNT, 0, conv["oh"]),
+                ],
+            )
+    return costing, cards
+
+
+def post_completion_costing(cur, order, costing, card) -> None:
+    """Close an order's costing at completion: labor rate / efficiency and
+    overhead absorption variances, transfer to finished stock at standard,
+    and the per-order cost summary row."""
+    quantity = order["quantity"]
+    cur.execute(
+        "SELECT source_zone_id, expected_minutes, standard_minutes FROM process_steps WHERE facility_id = %s",
+        (order["facility_id"],),
+    )
+    ratios = {
+        row["source_zone_id"]: (
+            row["expected_minutes"] / row["standard_minutes"] if row["standard_minutes"] else 1.0
+        )
+        for row in cur.fetchall()
+    }
+
+    conv_rows = station_conversion(card, costing, quantity)
+    dl_applied = round(sum(row["dl"] for row in conv_rows), 2)
+    oh_applied = round(sum(row["oh"] for row in conv_rows), 2)
+
+    actual_dl = 0.0
+    lrv = 0.0
+    for labor in card["labor_lines"]:
+        ratio = ratios.get(labor["zone_id"], 1.0)
+        std_minutes = labor["minutes"] * quantity
+        actual_minutes = std_minutes * ratio
+        actual_dl = round(actual_dl + actual_minutes * labor["rate_actual"] / 60, 2)
+        lrv = round(lrv + actual_minutes * (labor["rate_actual"] - labor["rate_std"]) / 60, 2)
+    lev = round(actual_dl - dl_applied - lrv, 2)
+    actual_oh = round(actual_dl * costing["oh_pct"], 2)
+    oh_variance = round(actual_oh - oh_applied, 2)
+
+    variance_lines = []
+    for account, amount, clearing in (
+        ("5230", lrv, PAYROLL_ACCOUNT),
+        ("5240", lev, PAYROLL_ACCOUNT),
+        ("5250", oh_variance, OH_ACCOUNT),
+    ):
+        if amount > 0:
+            variance_lines += [(account, amount, 0), (clearing, 0, amount)]
+        elif amount < 0:
+            variance_lines += [(clearing, -amount, 0), (account, 0, -amount)]
+    if variance_lines:
+        post_cost_entry(
+            cur, f"PO{order['id']}-VAR", order["id"], order["order_no"], "variances",
+            f"Labor and overhead variances recognized at completion of {order['order_no']}",
+            variance_lines,
+        )
+
+    wip_std, rm_actual, sub_std, ppv = dm_issue_amounts(card, quantity)
+    fg_amount = round(wip_std + dl_applied + oh_applied, 2)
+    stock_account = FG_ACCOUNT if order["finished_good"] == "DRN-FG-600" else SUBASSY_ACCOUNT
+    post_cost_entry(
+        cur, f"PO{order['id']}-FG", order["id"], order["order_no"], "fg_transfer",
+        f"{order['order_no']} transferred to finished stock at standard",
+        [(stock_account, fg_amount, 0), (WIP_ACCOUNT, 0, fg_amount)],
+    )
+
+    cur.execute(
+        """
+        INSERT INTO order_costs (
+          production_order_id, order_no, sku, quantity,
+          std_dm, std_dl, std_oh, std_total,
+          actual_dm, actual_dl, actual_oh,
+          ppv, usage_variance, labor_rate_variance, labor_efficiency_variance,
+          oh_variance, total_variance
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s)
+        ON CONFLICT (production_order_id) DO NOTHING
+        """,
+        (
+            order["id"], order["order_no"], order["finished_good"], quantity,
+            wip_std, dl_applied, oh_applied, fg_amount,
+            round(rm_actual + sub_std, 2), actual_dl, actual_oh,
+            ppv, lrv, lev, oh_variance,
+            round(ppv + lrv + lev + oh_variance, 2),
+        ),
+    )
+
+
+def run_simulation_sync(cur) -> list[dict]:
+    """The standard polling sync: simulate, persist runtime state, drive
+    completions (which also posts costing). Used by the costing endpoints so
+    the books stay current whichever page is open."""
+    all_states = simulate_active_states(cur)
+    for state in all_states:
+        sync_order_runtime_status(cur, state)
+        if state["order"]["production_status"] == "queued":
+            normalize_queued_order(cur, state)
+        else:
+            sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
+    complete_finished_pipeline_orders(cur, all_states)
+    return all_states
+
+
+def account_balances(cur) -> list[dict]:
+    cur.execute(
+        """
+        SELECT a.account_no, a.name, a.account_type, a.normal_side,
+               COALESCE(SUM(l.debit), 0) AS total_debit,
+               COALESCE(SUM(l.credit), 0) AS total_credit
+        FROM gl_accounts a
+        LEFT JOIN cost_lines l ON l.account_no = a.account_no
+        GROUP BY a.account_no, a.name, a.account_type, a.normal_side
+        ORDER BY a.account_no
+        """
+    )
+    rows = []
+    for row in cur.fetchall():
+        debit = float(row["total_debit"])
+        credit = float(row["total_credit"])
+        balance = round(debit - credit, 2) if row["normal_side"] == "debit" else round(credit - debit, 2)
+        rows.append({**row, "total_debit": round(debit, 2), "total_credit": round(credit, 2), "balance": balance})
+    return rows
+
+
+def gl_balance(balances: list[dict], account_no: str) -> float:
+    return next((row["balance"] for row in balances if row["account_no"] == account_no), 0.0)
+
+
+def fetch_cost_cards() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            costing = load_costing(cur)
+            if costing is None:
+                raise ValueError("Costing tables are not installed yet.")
+            return {
+                "cards": [
+                    cost_card(cur, costing, "DRN-FG-600"),
+                    cost_card(cur, costing, "CASE-FG-500"),
+                ]
+            }
+
+
+def fetch_costing_wip() -> dict:
+    """Live WIP valuation per active order, tied to the GL WIP balance."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            states = run_simulation_sync(cur)
+            conn.commit()
+            costing = load_costing(cur)
+            if costing is None:
+                raise ValueError("Costing tables are not installed yet.")
+            cards = {}
+            rows = []
+            absorbed_total = 0.0
+            for state in states:
+                order = state["order"]
+                if order["production_status"] == "complete":
+                    continue
+                sku = order["finished_good"]
+                if sku not in cards:
+                    cards[sku] = cost_card(cur, costing, sku)
+                card = cards[sku]
+                quantity = order["quantity"]
+                queued = order["production_status"] == "queued"
+                completed_zones = {
+                    row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+                }
+                conv_rows = station_conversion(card, costing, quantity)
+                dm_std = 0.0 if queued else round(card["dm_std"] * quantity, 2)
+                conv_done = round(
+                    sum(row["dl"] + row["oh"] for row in conv_rows if row["zone_id"] in completed_zones), 2
+                )
+                absorbed = round(dm_std + (0.0 if queued else conv_done), 2)
+                at_completion = round(
+                    round(card["dm_std"] * quantity, 2)
+                    + sum(row["dl"] for row in conv_rows)
+                    + sum(row["oh"] for row in conv_rows),
+                    2,
+                )
+                absorbed_total = round(absorbed_total + absorbed, 2)
+                rows.append(
+                    {
+                        "order_no": order["order_no"],
+                        "sku": sku,
+                        "quantity": quantity,
+                        "production_status": order["production_status"],
+                        "stations_done": len(completed_zones),
+                        "stations_total": len(conv_rows),
+                        "dm_absorbed": dm_std,
+                        "conversion_absorbed": 0.0 if queued else conv_done,
+                        "absorbed": absorbed,
+                        "std_at_completion": at_completion,
+                    }
+                )
+            balances = account_balances(cur)
+            wip_gl = gl_balance(balances, WIP_ACCOUNT)
+    return {
+        "orders": rows,
+        "absorbed_total": absorbed_total,
+        "gl_wip": wip_gl,
+        "tie_delta": round(wip_gl - absorbed_total, 2),
+    }
+
+
+def fetch_variance_report() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            run_simulation_sync(cur)
+            conn.commit()
+            if not costing_ready(cur):
+                raise ValueError("Costing tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT order_no, sku, quantity, std_dm, std_dl, std_oh, std_total,
+                       actual_dm, actual_dl, actual_oh, ppv, usage_variance,
+                       labor_rate_variance, labor_efficiency_variance, oh_variance,
+                       total_variance, completed_at
+                FROM order_costs
+                ORDER BY completed_at DESC, id DESC
+                LIMIT 25
+                """
+            )
+            orders = cur.fetchall()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS orders,
+                       COALESCE(SUM(std_total), 0) AS std_total,
+                       COALESCE(SUM(ppv), 0) AS ppv,
+                       COALESCE(SUM(usage_variance), 0) AS usage_variance,
+                       COALESCE(SUM(labor_rate_variance), 0) AS labor_rate_variance,
+                       COALESCE(SUM(labor_efficiency_variance), 0) AS labor_efficiency_variance,
+                       COALESCE(SUM(oh_variance), 0) AS oh_variance,
+                       COALESCE(SUM(total_variance), 0) AS total_variance
+                FROM order_costs
+                """
+            )
+            totals = cur.fetchone()
+    return {"orders": orders, "totals": totals}
+
+
+def fetch_cost_ledger(order_no: str | None, limit: int) -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if not costing_ready(cur):
+                raise ValueError("Costing tables are not installed yet.")
+            params: list[object] = []
+            where = ""
+            if order_no:
+                where = "WHERE e.order_no = %s"
+                params.append(order_no)
+            params.append(limit)
+            cur.execute(
+                f"""
+                SELECT e.id, e.event_ref, e.order_no, e.event_type, e.memo, e.posted_at
+                FROM cost_entries e
+                {where}
+                ORDER BY e.id DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            entries = cur.fetchall()
+            entry_ids = [entry["id"] for entry in entries]
+            lines_by_entry: dict[int, list] = {}
+            if entry_ids:
+                cur.execute(
+                    """
+                    SELECT l.entry_id, l.account_no, a.name AS account_name, l.debit, l.credit
+                    FROM cost_lines l
+                    JOIN gl_accounts a ON a.account_no = l.account_no
+                    WHERE l.entry_id = ANY(%s)
+                    ORDER BY l.id
+                    """,
+                    (entry_ids,),
+                )
+                for line in cur.fetchall():
+                    lines_by_entry.setdefault(line["entry_id"], []).append(line)
+            for entry in entries:
+                entry["lines"] = lines_by_entry.get(entry["id"], [])
+    return {"entries": entries}
+
+
+def fetch_trial_balance() -> dict:
+    """Trial balance plus the control checks: balanced books, balanced
+    entries, GL-to-operations ties, and ledger immutability."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            states = run_simulation_sync(cur)
+            conn.commit()
+            costing = load_costing(cur)
+            if costing is None:
+                raise ValueError("Costing tables are not installed yet.")
+            balances = account_balances(cur)
+            total_debit = round(sum(row["total_debit"] for row in balances), 2)
+            total_credit = round(sum(row["total_credit"] for row in balances), 2)
+
+            cur.execute(
+                """
+                SELECT e.event_ref
+                FROM cost_entries e
+                JOIN cost_lines l ON l.entry_id = e.id
+                GROUP BY e.id, e.event_ref
+                HAVING ABS(SUM(l.debit) - SUM(l.credit)) > 0.01
+                """
+            )
+            unbalanced = [row["event_ref"] for row in cur.fetchall()]
+
+            cards = {
+                "DRN-FG-600": cost_card(cur, costing, "DRN-FG-600"),
+                "CASE-FG-500": cost_card(cur, costing, "CASE-FG-500"),
+            }
+            # Expected WIP: what the posting rules should have absorbed so far.
+            expected_wip = 0.0
+            case_in_transit = 0.0
+            for state in states:
+                order = state["order"]
+                if order["production_status"] in ("complete", "queued"):
+                    continue
+                card = cards.setdefault(
+                    order["finished_good"], cost_card(cur, costing, order["finished_good"])
+                )
+                quantity = order["quantity"]
+                completed_zones = {
+                    row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+                }
+                conv_done = sum(
+                    row["dl"] + row["oh"]
+                    for row in station_conversion(card, costing, quantity)
+                    if row["zone_id"] in completed_zones
+                )
+                expected_wip = round(expected_wip + round(card["dm_std"] * quantity, 2) + conv_done, 2)
+                if order["finished_good"] == "DRN-FG-600":
+                    case_line = next(
+                        (line for line in card["dm_lines"] if line["source"] == "make"), None
+                    )
+                    if case_line:
+                        case_in_transit = round(case_in_transit + case_line["ext_std"] * quantity, 2)
+
+            cur.execute(
+                "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+            )
+            stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+            case_expected = round(
+                stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
+            )
+            fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
+
+            cur.execute(
+                "SELECT tgname FROM pg_trigger WHERE tgname IN ('cost_entries_immutable', 'cost_lines_immutable')"
+            )
+            triggers = [row["tgname"] for row in cur.fetchall()]
+
+            def control(name, ok, detail):
+                return {"name": name, "ok": bool(ok), "detail": detail}
+
+            wip_gl = gl_balance(balances, WIP_ACCOUNT)
+            case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
+            fg_gl = gl_balance(balances, FG_ACCOUNT)
+            controls = [
+                control(
+                    "Trial balance in balance",
+                    abs(total_debit - total_credit) <= 0.01,
+                    f"Total DR {total_debit:,.2f} vs CR {total_credit:,.2f}",
+                ),
+                control(
+                    "Every journal entry balances",
+                    not unbalanced,
+                    "All entries balanced" if not unbalanced else f"Unbalanced: {', '.join(unbalanced[:5])}",
+                ),
+                control(
+                    "GL WIP ties to shop-floor absorption",
+                    abs(wip_gl - expected_wip) <= 1,
+                    f"GL {wip_gl:,.2f} vs simulated absorption {expected_wip:,.2f}",
+                ),
+                control(
+                    "Case subassembly GL ties to case stock at standard",
+                    abs(case_gl - case_expected) <= 1,
+                    f"GL {case_gl:,.2f} vs stock less in-flight pulls {case_expected:,.2f}",
+                ),
+                control(
+                    "Drone FG GL ties to drone stock at standard",
+                    abs(fg_gl - fg_expected) <= 1,
+                    f"GL {fg_gl:,.2f} vs stock at standard {fg_expected:,.2f}",
+                ),
+                control(
+                    "Cost ledger immutability enforced",
+                    len(triggers) == 2,
+                    "UPDATE triggers active on cost_entries and cost_lines"
+                    if len(triggers) == 2
+                    else "Missing immutability trigger(s)",
+                ),
+            ]
+    return {
+        "accounts": balances,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "controls": controls,
+        "note": (
+            "Raw Materials GL reflects standard-costing issues; physical buy-part "
+            "bins are not decremented in this demo, so RM has no physical tie-out."
+        ),
+    }
+
+
+def fetch_costing_standards() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if not costing_ready(cur):
+                raise ValueError("Costing tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT sc.part_number, sc.standard_cost, sc.actual_cost, sc.updated_at,
+                       (SELECT MIN(bi.description) FROM bom_items bi
+                         WHERE bi.part_number = sc.part_number) AS description
+                FROM standard_costs sc
+                ORDER BY sc.part_number
+                """
+            )
+            materials = cur.fetchall()
+            cur.execute("SELECT role, standard_rate, actual_rate, updated_at FROM labor_rates ORDER BY role")
+            rates = cur.fetchall()
+            cur.execute("SELECT category, description, pct FROM labor_overheads ORDER BY category")
+            overheads = cur.fetchall()
+            cur.execute(
+                """
+                SELECT changed_at, actor, item_type, item_key, field, old_value, new_value
+                FROM standards_audit
+                ORDER BY id DESC
+                LIMIT 20
+                """
+            )
+            audit = cur.fetchall()
+    return {"materials": materials, "rates": rates, "overheads": overheads, "audit": audit}
+
+
+def set_costing_standard(payload: dict) -> dict:
+    """Edit a material cost or labor rate; every change lands in the audit trail.
+    New standards price future postings only - posted entries are immutable."""
+    item_type = str(payload.get("itemType", "")).strip()
+    key = str(payload.get("key", "")).strip()
+    field = str(payload.get("field", "")).strip()
+    actor = str(payload.get("actor", "")).strip() or "controller"
+    if item_type not in ("material", "labor"):
+        raise ValueError("itemType must be material or labor.")
+    if field not in ("standard", "actual"):
+        raise ValueError("field must be standard or actual.")
+    try:
+        value = round(float(payload.get("value")), 2)
+    except (TypeError, ValueError):
+        raise ValueError("value must be a number.")
+    if value < 0 or value > 100000:
+        raise ValueError("value is out of range.")
+
+    table = "standard_costs" if item_type == "material" else "labor_rates"
+    key_column = "part_number" if item_type == "material" else "role"
+    column = (
+        ("standard_cost" if field == "standard" else "actual_cost")
+        if item_type == "material"
+        else ("standard_rate" if field == "standard" else "actual_rate")
+    )
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {column} AS old_value FROM {table} WHERE {key_column} = %s", (key,))
+            existing = cur.fetchone()
+            if not existing:
+                raise ValueError(f"Unknown {item_type}: {key}")
+            cur.execute(
+                f"UPDATE {table} SET {column} = %s, updated_at = now() WHERE {key_column} = %s",
+                (value, key),
+            )
+            cur.execute(
+                """
+                INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (actor, item_type, key, field, str(existing["old_value"]), f"{value:.2f}"),
+            )
+        conn.commit()
+    return {"itemType": item_type, "key": key, "field": field, "value": value, "actor": actor}
+
+
 def fetch_plant_settings() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -2394,6 +3159,35 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
+        if path in (
+            "/api/costing/cost-cards",
+            "/api/costing/wip",
+            "/api/costing/variances",
+            "/api/costing/ledger",
+            "/api/costing/trial-balance",
+            "/api/costing/standards",
+        ):
+            try:
+                if path == "/api/costing/cost-cards":
+                    payload = fetch_cost_cards()
+                elif path == "/api/costing/wip":
+                    payload = fetch_costing_wip()
+                elif path == "/api/costing/variances":
+                    payload = fetch_variance_report()
+                elif path == "/api/costing/ledger":
+                    order_no = query.get("orderNo", [None])[0]
+                    limit = min(max(int(query.get("limit", ["30"])[0]), 1), 200)
+                    payload = fetch_cost_ledger(order_no, limit)
+                elif path == "/api/costing/trial-balance":
+                    payload = fetch_trial_balance()
+                else:
+                    payload = fetch_costing_standards()
+                json_response(self, HTTPStatus.OK, payload)
+            except ValueError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
         if path == "/api/kit-check":
             try:
                 finished_sku = query.get("sku", [DEFAULT_FINISHED_SKU])[0] or DEFAULT_FINISHED_SKU
@@ -2428,6 +3222,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/order-priority",
             "/api/plant-settings",
             "/api/station-signoff",
+            "/api/costing/standards",
             "/api/schedule/preview",
             "/api/schedule/max-output",
         ):
@@ -2457,6 +3252,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/station-signoff":
                 json_response(self, HTTPStatus.OK, record_station_signoff(payload))
+                return
+            if path == "/api/costing/standards":
+                json_response(self, HTTPStatus.OK, set_costing_standard(payload))
                 return
             if path == "/api/ask-ai":
                 json_response(self, HTTPStatus.OK, ask_ai(payload))

@@ -1889,3 +1889,130 @@ body.view-rework .shipping-route {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Standard costing page --- */
+
+.cost-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.cost-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+
+.cost-card h3 {
+  margin: 0 0 10px;
+  font-size: 0.92rem;
+}
+
+.cost-card table + table {
+  margin-top: 10px;
+}
+
+.var-unfav {
+  color: #dc2626;
+  font-weight: 800;
+}
+
+.var-fav {
+  color: #047857;
+  font-weight: 800;
+}
+
+.var-zero {
+  color: var(--muted);
+}
+
+.tb-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.control-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.control-list li {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  padding: 10px 12px;
+}
+
+.control-list li strong {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.78rem;
+}
+
+.control-list li p {
+  margin: 4px 0 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.journal-table .journal-entry-row td {
+  background: var(--oa-accent-tint);
+  font-weight: 700;
+}
+
+.journal-filter {
+  min-height: 34px;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+}
+
+.actor-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.actor-label input {
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e1;
+  width: 140px;
+}
+
+.std-input {
+  width: 92px;
+  min-height: 30px;
+  padding: 2px 6px;
+  border: 1px solid #cbd5e1;
+}
+
+.std-save {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  background: var(--oa-accent);
+  color: var(--oa-accent-fg);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.std-save:hover {
+  background: var(--oa-accent-hover);
+}
+
+@media (max-width: 1100px) {
+  .cost-cards,
+  .tb-grid {
+    grid-template-columns: 1fr;
+  }
+}
