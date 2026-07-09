@@ -2277,3 +2277,43 @@ body.view-rework .shipping-route {
     color: #000 !important;
   }
 }
+
+/* --- Sales order line editor --- */
+
+.so-lines {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.so-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.so-line select,
+.so-line input {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+}
+
+.so-qty {
+  width: 80px;
+}
+
+.so-price {
+  width: 110px;
+}
+
+.so-remove {
+  min-height: 32px;
+  min-width: 32px;
+  border: 1px solid #fecaca;
+  background: #fff;
+  color: #dc2626;
+  font-weight: 800;
+  cursor: pointer;
+}
