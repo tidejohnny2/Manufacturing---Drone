@@ -7,6 +7,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
@@ -62,6 +63,103 @@ def simulation_factor_for(recorded_minutes: float) -> float:
     if test_total_minutes and recorded_minutes > 0:
         return min(max(test_total_minutes / recorded_minutes, 0.001), 1.0)
     return read_simulation_factor()
+
+
+def read_plant_settings(cur) -> dict:
+    """The single plant_settings row as the API shape; defaults mean 24/7."""
+    cur.execute("SELECT to_regclass('plant_settings') AS reg")
+    row = None
+    if cur.fetchone()["reg"] is not None:
+        cur.execute("SELECT work_start, work_end, work_days, time_zone FROM plant_settings WHERE id = 1")
+        row = cur.fetchone()
+    if not row:
+        return {"work_start": None, "work_end": None, "work_days": [], "time_zone": "UTC"}
+    days = sorted(
+        int(day) for day in (row["work_days"] or "").split(",") if day.strip().isdigit()
+    )
+    return {
+        "work_start": row["work_start"].strftime("%H:%M") if row["work_start"] else None,
+        "work_end": row["work_end"].strftime("%H:%M") if row["work_end"] else None,
+        "work_days": days,
+        "time_zone": row["time_zone"] or "UTC",
+    }
+
+
+def load_work_calendar(cur) -> dict | None:
+    """Runtime calendar for schedule math, or None for 24/7."""
+    settings = read_plant_settings(cur)
+    if not settings["work_start"] or not settings["work_end"] or not settings["work_days"]:
+        return None
+    if settings["work_start"] == settings["work_end"]:
+        return None
+    start_hour, start_minute = (int(part) for part in settings["work_start"].split(":"))
+    end_hour, end_minute = (int(part) for part in settings["work_end"].split(":"))
+    try:
+        plant_tz = ZoneInfo(settings["time_zone"])
+    except Exception:
+        plant_tz = timezone.utc
+    return {
+        "start": (start_hour, start_minute),
+        "end": (end_hour, end_minute),
+        "days": set(settings["work_days"]),
+        "tz": plant_tz,
+    }
+
+
+def shift_window_for(day_start: datetime, calendar: dict) -> tuple[datetime, datetime]:
+    """The working window that begins on the given plant-local day; an end at or
+    before the start means an overnight shift running into the next day."""
+    window_start = day_start.replace(hour=calendar["start"][0], minute=calendar["start"][1])
+    window_end = day_start.replace(hour=calendar["end"][0], minute=calendar["end"][1])
+    if window_end <= window_start:
+        window_end += timedelta(days=1)
+    return window_start, window_end
+
+
+def next_working(moment: datetime, calendar: dict | None) -> datetime:
+    """The given moment if the plant is working, else the next shift start."""
+    if not calendar:
+        return moment
+    local = moment.astimezone(calendar["tz"])
+    day_base = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day_offset in range(-1, 15):
+        day_start = day_base + timedelta(days=day_offset)
+        if day_start.weekday() not in calendar["days"]:
+            continue
+        window_start, window_end = shift_window_for(day_start, calendar)
+        if local < window_start:
+            return window_start.astimezone(timezone.utc)
+        if window_start <= local < window_end:
+            return moment
+    return moment
+
+
+def add_working_minutes(moment: datetime, minutes: float, calendar: dict | None) -> datetime:
+    """Advance by working minutes, skipping off-shift time entirely."""
+    if not calendar:
+        return moment + timedelta(minutes=minutes)
+    remaining = minutes
+    cursor = next_working(moment, calendar)
+    for _ in range(400):
+        local = cursor.astimezone(calendar["tz"])
+        day_base = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end_utc = None
+        for day_offset in (-1, 0):
+            day_start = day_base + timedelta(days=day_offset)
+            if day_start.weekday() not in calendar["days"]:
+                continue
+            window_start, window_end = shift_window_for(day_start, calendar)
+            if window_start <= local < window_end:
+                window_end_utc = window_end.astimezone(timezone.utc)
+        if window_end_utc is None:
+            cursor = next_working(cursor + timedelta(minutes=1), calendar)
+            continue
+        available = (window_end_utc - cursor).total_seconds() / 60
+        if remaining <= available + 1e-9:
+            return cursor + timedelta(minutes=remaining)
+        remaining -= available
+        cursor = next_working(window_end_utc, calendar)
+    return cursor
 
 
 def json_response(handler: SimpleHTTPRequestHandler, status: HTTPStatus, payload: dict) -> None:
@@ -184,14 +282,14 @@ def fetch_active_orders(cur) -> list[dict]:
         """
         SELECT po.id, po.order_no, m.sku AS finished_good, po.quantity,
                po.status, po.current_zone_id, z.name AS current_zone,
-               po.start_date, po.due_date, po.created_at,
+               po.start_date, po.due_date, po.created_at, po.priority,
                fz.facility_id
         FROM production_orders po
         JOIN materials m ON m.id = po.finished_material_id
         JOIN zones fz ON fz.id = m.default_zone_id
         JOIN zones z ON z.id = po.current_zone_id
         WHERE po.status IN ('planned', 'released', 'in_progress', 'hold')
-        ORDER BY po.created_at, po.id
+        ORDER BY po.priority, po.created_at, po.id
         """
     )
     return cur.fetchall()
@@ -221,7 +319,9 @@ def build_zone_model(route_steps: list[dict]) -> tuple[list[str], dict, dict, di
     return zone_order, zone_names, durations, standard_durations, capacities
 
 
-def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> list[dict]:
+def simulated_pipeline_state(
+    orders: list[dict], route_steps: list[dict], calendar: dict | None = None
+) -> list[dict]:
     zone_order, zone_names, durations, standard_durations, capacities = build_zone_model(route_steps)
     single_pass_minutes = sum(durations.values())
     single_pass_recorded = sum(standard_durations.values())
@@ -248,8 +348,8 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
             batches = math.ceil(order["quantity"] / capacity) if capacity else 1
             duration = durations.get(zone_id, 0) * batches
             recorded_minutes += standard_durations.get(zone_id, 0) * batches
-            start_time = max(previous_end, station_available[zone_id])
-            end_time = start_time + timedelta(minutes=duration)
+            start_time = next_working(max(previous_end, station_available[zone_id]), calendar)
+            end_time = add_working_minutes(start_time, duration, calendar)
             schedule.append(
                 {
                     "zone_id": zone_id,
@@ -289,7 +389,11 @@ def simulated_pipeline_state(orders: list[dict], route_steps: list[dict]) -> lis
                     assigned_index = index
                     completed_zone_ids = set(zone_order[:index])
                     status = "in_progress"
-                    current_elapsed = (now - segment["start"]).total_seconds() / 60
+                    # A segment can span off-shift gaps, so cap station elapsed
+                    # at the segment's working duration.
+                    current_elapsed = min(
+                        (now - segment["start"]).total_seconds() / 60, segment["duration"]
+                    )
                     current_duration = segment["duration"]
                     work_elapsed = sum(item["duration"] for item in schedule[:index]) + current_elapsed
                     break
@@ -363,12 +467,13 @@ def simulate_active_states(cur, facility_id: int | None = None) -> list[dict]:
     if facility_id is not None:
         orders = [order for order in orders if order["facility_id"] == facility_id]
 
+    calendar = load_work_calendar(cur)
     states = []
     for current_facility_id in sorted({order["facility_id"] for order in orders}):
         facility_orders = [order for order in orders if order["facility_id"] == current_facility_id]
         route_steps = fetch_route_steps(cur, current_facility_id)
         if route_steps:
-            states.extend(simulated_pipeline_state(facility_orders, route_steps))
+            states.extend(simulated_pipeline_state(facility_orders, route_steps, calendar))
     return states
 
 
@@ -678,7 +783,7 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
                     """
                     SELECT po.id, po.order_no, m.sku AS finished_good, po.quantity,
                            po.status, po.current_zone_id, z.name AS current_zone,
-                           po.start_date, po.due_date, po.created_at,
+                           po.start_date, po.due_date, po.created_at, po.priority,
                            fz.facility_id
                     FROM production_orders po
                     JOIN materials m ON m.id = po.finished_material_id
@@ -694,12 +799,13 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
                 active_orders = fetch_active_orders(cur)
                 if not any(active["id"] == order["id"] for active in active_orders):
                     active_orders.append(order)
+                calendar = load_work_calendar(cur)
                 active_states = []
                 for facility_id in sorted({active["facility_id"] for active in active_orders}):
                     facility_orders = [active for active in active_orders if active["facility_id"] == facility_id]
                     route_steps = fetch_route_steps(cur, facility_id)
                     if route_steps:
-                        active_states.extend(simulated_pipeline_state(facility_orders, route_steps))
+                        active_states.extend(simulated_pipeline_state(facility_orders, route_steps, calendar))
                 if not active_states:
                     return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
                 selected_state = next(
@@ -914,6 +1020,23 @@ def fetch_operations_overview() -> dict:
             cur.execute("SELECT id, name FROM facilities ORDER BY id")
             facilities = cur.fetchall()
 
+            # Line output over the last 24 hours, for utilization against the
+            # bottleneck ceiling.
+            cur.execute(
+                """
+                SELECT fz.facility_id, COALESCE(SUM(po.quantity), 0) AS quantity
+                FROM production_orders po
+                JOIN materials m ON m.id = po.finished_material_id
+                JOIN zones fz ON fz.id = m.default_zone_id
+                WHERE po.status = 'complete'
+                  AND po.updated_at >= now() - interval '24 hours'
+                GROUP BY fz.facility_id
+                """
+            )
+            output_24h_by_facility = {row["facility_id"]: float(row["quantity"]) for row in cur.fetchall()}
+
+            now = datetime.now(timezone.utc)
+            window_start = now - timedelta(hours=1)
             pipelines = []
             for facility in facilities:
                 facility_states = [
@@ -921,8 +1044,13 @@ def fetch_operations_overview() -> dict:
                     if state["order"]["facility_id"] == facility["id"]
                 ]
                 stations = []
-                if facility_states:
+                ceiling_per_hour = None
+                bottleneck_station = None
+                route_steps = fetch_route_steps(cur, facility["id"])
+                if route_steps:
+                    zone_order, zone_names, _, standard_durations, zone_capacities = build_zone_model(route_steps)
                     totals = {}
+                    busy_seconds = {zone_id: 0.0 for zone_id in zone_order}
                     for state in facility_states:
                         for row in state["balances"]:
                             zone = totals.setdefault(row["zone_id"], {"wip": 0, "done": 0, "orders": []})
@@ -930,36 +1058,53 @@ def fetch_operations_overview() -> dict:
                             zone["done"] += row["completed_quantity"]
                             if row["wip_quantity"] > 0:
                                 zone["orders"].append(state["order"]["order_no"])
-                    stations = [
-                        {
-                            "zone_id": row["zone_id"],
-                            "station": row["station"],
-                            "capacity": row["capacity"],
-                            **totals.get(row["zone_id"], {"wip": 0, "done": 0, "orders": []}),
-                        }
-                        for row in facility_states[0]["balances"]
-                    ]
-                else:
-                    route_steps = fetch_route_steps(cur, facility["id"])
-                    if route_steps:
-                        zone_order, zone_names, _, _, zone_capacities = build_zone_model(route_steps)
-                        stations = [
+                        for segment in state["schedule"]:
+                            overlap_start = max(segment["start"], window_start)
+                            overlap_end = min(segment["end"], now)
+                            if overlap_end > overlap_start:
+                                busy_seconds[segment["zone_id"]] += (overlap_end - overlap_start).total_seconds()
+                    for zone_id in zone_order:
+                        capacity = zone_capacities.get(zone_id)
+                        cycle_minutes = standard_durations.get(zone_id)
+                        max_per_hour = (
+                            round(capacity * 60 / cycle_minutes, 1)
+                            if capacity and cycle_minutes
+                            else None
+                        )
+                        stations.append(
                             {
                                 "zone_id": zone_id,
                                 "station": zone_names.get(zone_id, zone_id),
-                                "capacity": zone_capacities.get(zone_id),
-                                "wip": 0,
-                                "done": 0,
-                                "orders": [],
+                                "capacity": capacity,
+                                "max_per_hour": max_per_hour,
+                                "bottleneck": False,
+                                "busy_pct_last_hour": round(busy_seconds.get(zone_id, 0.0) / 36, 1),
+                                **totals.get(zone_id, {"wip": 0, "done": 0, "orders": []}),
                             }
-                            for zone_id in zone_order
-                        ]
+                        )
+                    constrained = [s for s in stations if s["max_per_hour"] is not None]
+                    if constrained:
+                        ceiling_per_hour = min(s["max_per_hour"] for s in constrained)
+                        for station in stations:
+                            if station["max_per_hour"] == ceiling_per_hour:
+                                station["bottleneck"] = True
+                                if bottleneck_station is None:
+                                    bottleneck_station = station["station"]
+                output_24h = output_24h_by_facility.get(facility["id"], 0.0)
                 pipelines.append(
                     {
                         "facility_id": facility["id"],
                         "facility_name": facility["name"],
                         "active_orders": len(facility_states),
                         "stations": stations,
+                        "ceiling_per_hour": ceiling_per_hour,
+                        "bottleneck_station": bottleneck_station,
+                        "output_24h": output_24h,
+                        "pct_of_ceiling_24h": (
+                            round(output_24h / (ceiling_per_hour * 24) * 100, 1)
+                            if ceiling_per_hour
+                            else None
+                        ),
                     }
                 )
 
@@ -1040,6 +1185,8 @@ def fetch_operations_overview() -> dict:
                 "shortage_count": len(shortages),
             }
 
+            work_hours = read_plant_settings(cur)
+
     return {
         "summary": summary,
         "pipelines": pipelines,
@@ -1048,6 +1195,7 @@ def fetch_operations_overview() -> dict:
         "shortages": shortages,
         "completed_today": completed_today,
         "recent_transactions": recent_transactions,
+        "work_hours": work_hours,
     }
 
 
@@ -1131,6 +1279,7 @@ def fetch_schedule() -> dict:
                             "quantity": state["order"]["quantity"],
                             "production_status": state["order"]["production_status"],
                             "percent_complete": state["order"]["percent_complete"],
+                            "priority": state["order"].get("priority"),
                             "due_date": str(state["order"]["due_date"]),
                             "start": segments[0]["start"] if segments else None,
                             "finish": segments[-1]["end"] if segments else None,
@@ -1147,7 +1296,13 @@ def fetch_schedule() -> dict:
                     }
                 )
 
-    return {"now": datetime.now(timezone.utc).isoformat(), "lines": lines}
+            work_hours = read_plant_settings(cur)
+
+    return {
+        "now": datetime.now(timezone.utc).isoformat(),
+        "lines": lines,
+        "work_hours": work_hours,
+    }
 
 
 def resolve_finished_good(cur, finished_sku: str) -> dict:
@@ -1166,7 +1321,7 @@ def resolve_finished_good(cur, finished_sku: str) -> dict:
     return finished
 
 
-def project_phantom(facility_orders, route_steps, finished_sku, quantity, due_date, now):
+def project_phantom(facility_orders, route_steps, finished_sku, quantity, due_date, now, calendar=None):
     """Simulate a prospective order appended to the facility's live queue."""
     zone_order, zone_names, _, _, _ = build_zone_model(route_steps)
     phantom = {
@@ -1182,7 +1337,7 @@ def project_phantom(facility_orders, route_steps, finished_sku, quantity, due_da
         "created_at": now,
         "facility_id": None,
     }
-    states = simulated_pipeline_state(facility_orders + [phantom], route_steps)
+    states = simulated_pipeline_state(facility_orders + [phantom], route_steps, calendar)
     phantom_state = next(state for state in states if state["order"]["id"] == -1)
     return phantom_state, zone_names
 
@@ -1235,11 +1390,12 @@ def preview_schedule(payload: dict) -> dict:
                 raise ValueError("No route defined for that product.")
 
             now = datetime.now(timezone.utc)
+            calendar = load_work_calendar(cur)
             facility_orders = [
                 order for order in fetch_active_orders(cur) if order["facility_id"] == facility_id
             ]
             phantom_state, zone_names = project_phantom(
-                facility_orders, route_steps, finished_sku, quantity, due_date, now
+                facility_orders, route_steps, finished_sku, quantity, due_date, now, calendar
             )
             segments = schedule_segments(phantom_state, zone_names)
 
@@ -1277,12 +1433,15 @@ def max_output_schedule(payload: dict) -> dict:
 
             now = datetime.now(timezone.utc)
             deadline = now + timedelta(minutes=window_minutes)
+            calendar = load_work_calendar(cur)
             facility_orders = [
                 order for order in fetch_active_orders(cur) if order["facility_id"] == facility_id
             ]
 
             def finish_for(qty: int) -> datetime:
-                state, _ = project_phantom(facility_orders, route_steps, finished_sku, qty, "", now)
+                state, _ = project_phantom(
+                    facility_orders, route_steps, finished_sku, qty, "", now, calendar
+                )
                 return state["schedule"][-1]["end"]
 
             CAP = 10000
@@ -1315,7 +1474,7 @@ def max_output_schedule(payload: dict) -> dict:
                 }
 
             phantom_state, zone_names = project_phantom(
-                facility_orders, route_steps, finished_sku, max_quantity, "", now
+                facility_orders, route_steps, finished_sku, max_quantity, "", now, calendar
             )
             segments = schedule_segments(phantom_state, zone_names)
             pulls = pull_impact(cur, finished["material_id"], max_quantity)
@@ -1604,6 +1763,125 @@ def set_zone_capacity(payload: dict) -> dict:
     return {"zoneId": zone_id, "name": zone["name"], "capacity": capacity}
 
 
+def set_order_priority(payload: dict) -> dict:
+    """Move an active order one slot up or down its line's queue. The whole
+    line is renumbered 10, 20, 30... so the sequence stays unambiguous; the
+    deterministic schedule re-times in-flight orders on the next poll."""
+    order_no = str(payload.get("orderNo", "")).strip()
+    direction = str(payload.get("direction", "")).strip()
+    if direction not in ("up", "down"):
+        raise ValueError("Direction must be 'up' or 'down'.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            orders = fetch_active_orders(cur)
+            target = next((order for order in orders if order["order_no"] == order_no), None)
+            if not target:
+                raise ValueError("That order is not active.")
+            line = [order for order in orders if order["facility_id"] == target["facility_id"]]
+            index = line.index(target)
+            swap_index = index - 1 if direction == "up" else index + 1
+            moved = 0 <= swap_index < len(line)
+            if moved:
+                line[index], line[swap_index] = line[swap_index], line[index]
+                for position, order in enumerate(line, start=1):
+                    cur.execute(
+                        "UPDATE production_orders SET priority = %s WHERE id = %s",
+                        (position * 10, order["id"]),
+                    )
+        conn.commit()
+
+    return {"orderNo": order_no, "moved": moved, "sequence": [order["order_no"] for order in line]}
+
+
+def set_zone_cycle(payload: dict) -> dict:
+    """Edit a station's recorded cycle minutes (process_steps.expected_minutes
+    keyed by source zone). Reweights the simulated schedule, the station's max
+    output, and the line bottleneck on the next poll."""
+    zone_id = str(payload.get("zoneId", "")).strip()
+    minutes = payload.get("minutes")
+    if minutes is None:
+        raise ValueError("Cycle minutes are required.")
+    minutes = int(minutes)
+    if minutes < 1:
+        raise ValueError("Cycle minutes must be at least 1.")
+    if minutes > 10000:
+        raise ValueError("Cycle minutes are unrealistically large.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM zones WHERE id = %s", (zone_id,))
+            zone = cur.fetchone()
+            if not zone:
+                raise ValueError("Unknown zone.")
+            cur.execute(
+                "UPDATE process_steps SET expected_minutes = %s WHERE source_zone_id = %s",
+                (minutes, zone_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("That zone has no routed cycle time to edit.")
+        conn.commit()
+
+    return {"zoneId": zone_id, "name": zone["name"], "minutes": minutes}
+
+
+def fetch_plant_settings() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return read_plant_settings(cur)
+
+
+def set_plant_settings(payload: dict) -> dict:
+    """Save the plant working-hours calendar. Null start/end clears to 24/7."""
+    work_start = payload.get("workStart")
+    work_end = payload.get("workEnd")
+    work_days = payload.get("workDays") or []
+    time_zone = str(payload.get("timeZone", "UTC")).strip() or "UTC"
+
+    if (work_start is None) != (work_end is None):
+        raise ValueError("Set both start and end times, or clear both for 24/7.")
+    if work_start is not None:
+        try:
+            datetime.strptime(str(work_start), "%H:%M")
+            datetime.strptime(str(work_end), "%H:%M")
+        except ValueError:
+            raise ValueError("Times must be HH:MM.")
+        if str(work_start) == str(work_end):
+            raise ValueError("Start and end must differ; clear both for 24/7.")
+        days = sorted({int(day) for day in work_days})
+        if not days or any(day < 0 or day > 6 for day in days):
+            raise ValueError("Pick at least one working day (Monday through Sunday).")
+        work_days = days
+    else:
+        work_days = []
+    try:
+        ZoneInfo(time_zone)
+    except Exception:
+        raise ValueError("Unknown time zone.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO plant_settings (id, work_start, work_end, work_days, time_zone)
+                VALUES (1, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE
+                SET work_start = EXCLUDED.work_start,
+                    work_end = EXCLUDED.work_end,
+                    work_days = EXCLUDED.work_days,
+                    time_zone = EXCLUDED.time_zone
+                """,
+                (
+                    work_start,
+                    work_end,
+                    ",".join(str(day) for day in work_days) if work_days else None,
+                    time_zone,
+                ),
+            )
+            conn.commit()
+            return read_plant_settings(cur)
+
+
 def build_ask_ai_context() -> tuple[str, dict]:
     """Render the live operations snapshot as compact text for the AI prompt."""
     data = fetch_operations_overview()
@@ -1636,10 +1914,28 @@ def build_ask_ai_context() -> tuple[str, dict]:
             for station in pipeline["stations"]
             if station["wip"] > 0
         ]
+        utilization = ""
+        if pipeline.get("ceiling_per_hour"):
+            utilization = (
+                f"; ceiling {pipeline['ceiling_per_hour']}/hr at {pipeline['bottleneck_station']}, "
+                f"last-24h output {pipeline['output_24h']} ({pipeline['pct_of_ceiling_24h']}% of ceiling)"
+            )
         lines.append(
             f"{pipeline['facility_name']}: {pipeline['active_orders']} active orders; "
             + ("busy stations: " + "; ".join(busy) if busy else "all stations idle")
+            + utilization
         )
+
+    hours = data.get("work_hours") or {}
+    if hours.get("work_start") and hours.get("work_end"):
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        days = ", ".join(day_names[day] for day in hours["work_days"])
+        lines.append(
+            f"Plant working hours: {hours['work_start']}-{hours['work_end']} on {days} "
+            f"({hours['time_zone']}); schedules skip off-shift time."
+        )
+    else:
+        lines.append("Plant working hours: 24/7.")
 
     lines.append("Inventory watch (on hand/allocated/available, min-max):")
     for row in data["inventory_watch"]:
@@ -1869,6 +2165,12 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
+        if path == "/api/plant-settings":
+            try:
+                json_response(self, HTTPStatus.OK, fetch_plant_settings())
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
         if path == "/api/station":
             try:
                 zone_id = query.get("zone", [""])[0].strip()
@@ -1889,6 +2191,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/reset-activity",
             "/api/ask-ai",
             "/api/zone-capacity",
+            "/api/zone-cycle",
+            "/api/order-priority",
+            "/api/plant-settings",
             "/api/schedule/preview",
             "/api/schedule/max-output",
         ):
@@ -1906,6 +2211,15 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/zone-capacity":
                 json_response(self, HTTPStatus.OK, set_zone_capacity(payload))
+                return
+            if path == "/api/zone-cycle":
+                json_response(self, HTTPStatus.OK, set_zone_cycle(payload))
+                return
+            if path == "/api/order-priority":
+                json_response(self, HTTPStatus.OK, set_order_priority(payload))
+                return
+            if path == "/api/plant-settings":
+                json_response(self, HTTPStatus.OK, set_plant_settings(payload))
                 return
             if path == "/api/ask-ai":
                 json_response(self, HTTPStatus.OK, ask_ai(payload))

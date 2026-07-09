@@ -214,3 +214,6 @@ VALUES
 
 SELECT create_production_order('CASE-PO-1001', 2, '2026-06-12', '2026-06-04', 'CASE-FG-500');
 SELECT create_production_order('DRN-PO-1001', 1, '2026-06-14', '2026-06-04');
+
+-- Plant working-hours calendar: single row, defaults to 24/7 until edited.
+INSERT INTO plant_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

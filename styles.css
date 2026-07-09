@@ -1642,3 +1642,83 @@ body.view-rework .shipping-route {
   font-size: 1rem;
   font-weight: 800;
 }
+
+/* --- Planning suite: queue re-sequencing + plant working hours --- */
+
+.prio-controls {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+}
+
+.prio-btn {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid var(--oa-accent);
+  background: #fff;
+  color: var(--oa-accent-ink);
+  font-size: 0.62rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.prio-btn:hover {
+  background: var(--oa-accent-tint);
+}
+
+.hours-band .hours-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hours-band .hours-row strong {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hours-band #hoursSummary {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.hours-days {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #cbd5e1;
+  padding: 6px 10px;
+}
+
+.hours-days legend {
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  padding: 0 4px;
+}
+
+.hours-days label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+#hours247 {
+  min-height: 40px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+#hours247:hover {
+  background: var(--oa-accent-tint);
+  color: var(--oa-accent-ink);
+}

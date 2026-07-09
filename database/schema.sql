@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS production_orders (
   current_zone_id TEXT NOT NULL REFERENCES zones(id),
   start_date DATE NOT NULL,
   due_date DATE NOT NULL,
+  -- Queue sequence: lower runs first, created_at breaks ties. Re-sequencing
+  -- assigns 10, 20, 30... so new orders (default 1000) join the back of the line.
+  priority INTEGER NOT NULL DEFAULT 1000,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -195,6 +198,18 @@ CREATE TABLE IF NOT EXISTS production_workstation_ledger (
   UNIQUE (production_order_id, zone_id, transaction_type, reference)
 );
 
+-- Single-row plant working-hours calendar. NULL work_start/work_end (or no
+-- selected days) means 24/7. Times are wall-clock in time_zone; work_days is a
+-- comma-separated list of weekday numbers, Monday = 0.
+CREATE TABLE IF NOT EXISTS plant_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  work_start TIME,
+  work_end TIME,
+  work_days TEXT,
+  time_zone TEXT NOT NULL DEFAULT 'UTC'
+);
+INSERT INTO plant_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 -- Data fixup for databases created before the case line: the drone transport case
 -- (CASE-FG-500) is both its own BOM parent on the case line and a component line on
 -- the drone BOM, so BOM part numbers are unique per parent instead of globally unique,
@@ -203,6 +218,7 @@ CREATE TABLE IF NOT EXISTS production_workstation_ledger (
 ALTER TABLE bom_items DROP CONSTRAINT IF EXISTS bom_items_part_number_key;
 ALTER TABLE bom_items ADD COLUMN IF NOT EXISTS source_zone_id TEXT REFERENCES zones(id);
 ALTER TABLE zones ADD COLUMN IF NOT EXISTS capacity INTEGER;
+ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 1000;
 DO $$
 BEGIN
   ALTER TABLE bom_items ADD CONSTRAINT bom_items_parent_part_unique UNIQUE (parent_material_id, part_number);

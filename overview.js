@@ -28,15 +28,23 @@ function renderPipelines(pipelines) {
         <div class="pipeline">
           <div class="pipeline-title">
             <strong>${line.facility_name}</strong>
-            <span>${line.active_orders} active order${line.active_orders === 1 ? "" : "s"}</span>
+            <span>${line.active_orders} active order${line.active_orders === 1 ? "" : "s"}${
+              line.ceiling_per_hour
+                ? ` · ceiling ${line.ceiling_per_hour}/hr @ ${line.bottleneck_station} ★ · 24 h out ${Number(line.output_24h)}${
+                    line.pct_of_ceiling_24h != null ? ` (${line.pct_of_ceiling_24h}% of ceiling)` : ""
+                  }`
+                : ""
+            }</span>
           </div>
           <div class="pipeline-strip">
             ${line.stations
               .map(
                 (station) => `
                   <div class="pipeline-station${station.wip > 0 ? " busy" : ""}${station.done > 0 && station.wip === 0 ? " done" : ""}">
-                    <span class="pipeline-station-name">${station.station}</span>
-                    <span class="pipeline-station-counts">WIP ${station.wip} | Done ${station.done}${station.capacity ? ` | Cap ${station.capacity}` : ""}</span>
+                    <span class="pipeline-station-name">${station.station}${station.bottleneck ? " ★" : ""}</span>
+                    <span class="pipeline-station-counts">WIP ${station.wip} | Done ${station.done}${station.capacity ? ` | Cap ${station.capacity}` : ""}${
+                      station.busy_pct_last_hour > 0 ? ` | Busy ${station.busy_pct_last_hour}%` : ""
+                    }</span>
                     ${station.orders.length ? `<span class="pipeline-station-order">${station.orders.join(", ")}</span>` : ""}
                   </div>
                 `

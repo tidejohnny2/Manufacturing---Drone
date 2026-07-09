@@ -28,8 +28,10 @@ function renderStation() {
     `${zone.description} (${Number(zone.area_sq_ft).toLocaleString()} sq ft · ${zone.primary_flow})`;
 
   document.querySelector("#capacityInput").value = zone.capacity ?? "";
-  document.querySelector("#cycleMinutes").textContent =
-    zone.cycle_minutes != null ? `${zone.cycle_minutes} min` : "—";
+  const cycleInput = document.querySelector("#cycleInput");
+  cycleInput.value = zone.cycle_minutes ?? "";
+  cycleInput.disabled = zone.cycle_minutes == null;
+  document.querySelector("#cycleSave").disabled = zone.cycle_minutes == null;
   document.querySelector("#maxOutput").textContent =
     zone.max_per_hour != null ? `${zone.max_per_hour} units/hr` : "unbounded";
   const running = data.schedule.some((item) => item.running);
@@ -159,6 +161,28 @@ document.querySelector("#capacitySave").addEventListener("click", async () => {
       return;
     }
     message.textContent = data.capacity ? `Saved: ${data.capacity} at a time` : "Saved: unconstrained";
+    loadStation().catch(() => {});
+  } catch (error) {
+    message.textContent = "Save failed.";
+  }
+});
+
+document.querySelector("#cycleSave").addEventListener("click", async () => {
+  const raw = document.querySelector("#cycleInput").value.trim();
+  const message = document.querySelector("#cycleMsg");
+  message.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/zone-cycle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ zoneId, minutes: raw === "" ? null : Number(raw) })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      message.textContent = data.error ?? "Save failed.";
+      return;
+    }
+    message.textContent = `Saved: ${data.minutes} min per cycle`;
     loadStation().catch(() => {});
   } catch (error) {
     message.textContent = "Save failed.";

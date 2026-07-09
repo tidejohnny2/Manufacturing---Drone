@@ -10,6 +10,17 @@ const previewResult = document.querySelector("#previewResult");
 const createPlanned = document.querySelector("#createPlanned");
 const fillToMax = document.querySelector("#fillToMax");
 const windowMinutes = document.querySelector("#windowMinutes");
+const hoursSummary = document.querySelector("#hoursSummary");
+const hoursEdit = document.querySelector("#hoursEdit");
+const hoursForm = document.querySelector("#hoursForm");
+const hoursStart = document.querySelector("#hoursStart");
+const hoursEnd = document.querySelector("#hoursEnd");
+const hoursDays = document.querySelector("#hoursDays");
+const hoursTz = document.querySelector("#hoursTz");
+const hours247 = document.querySelector("#hours247");
+const hoursMsg = document.querySelector("#hoursMsg");
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const ORDER_COLORS = ["#0284c7", "#7c3aed", "#059669", "#d97706", "#0891b2", "#c026d3", "#65a30d", "#e11d48"];
 let scheduleData = null;
@@ -61,12 +72,19 @@ function renderLine(line, now) {
   const legend = line.orders
     .map((order, index) => {
       const onTime = new Date(order.finish) <= new Date(order.due_date + "T23:59:59");
+      const prio = line.orders.length > 1
+        ? `<span class="prio-controls" data-order="${esc(order.order_no)}">
+             <button type="button" class="prio-btn" data-dir="up" title="Run earlier">&#9650;</button>
+             <button type="button" class="prio-btn" data-dir="down" title="Run later">&#9660;</button>
+           </span>`
+        : "";
       return `
         <span class="gantt-chip">
           <span class="gantt-dot" style="background:${ORDER_COLORS[index % ORDER_COLORS.length]}"></span>
-          ${esc(order.order_no)} (${esc(order.finished_good)}, qty ${order.quantity}) —
+          #${index + 1} ${esc(order.order_no)} (${esc(order.finished_good)}, qty ${order.quantity}) —
           ${order.percent_complete}% · due ${esc(order.due_date)}
           <strong class="${onTime ? "ontime" : "late"}">${onTime ? "on time" : "AT RISK"}</strong>
+          ${prio}
         </span>`;
     })
     .join("");
@@ -236,6 +254,103 @@ previewForm.addEventListener("submit", (event) => {
   runPreview();
 });
 
+// Queue re-sequencing: the ▲▼ buttons on legend chips move an order one slot
+// in its line's queue; the deterministic schedule re-times immediately.
+ganttLines.addEventListener("click", async (event) => {
+  const button = event.target.closest(".prio-btn");
+  if (!button) {
+    return;
+  }
+  const orderNo = button.closest(".prio-controls").dataset.order;
+  try {
+    const response = await fetch("/api/order-priority", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderNo, direction: button.dataset.dir })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      setMessage(data.error ?? "Unable to re-sequence.", true);
+      return;
+    }
+    setMessage(data.moved
+      ? `Moved ${orderNo} ${button.dataset.dir}. New sequence: ${data.sequence.join(" → ")}.`
+      : `${orderNo} is already at that end of the queue.`);
+    await loadSchedule().catch(() => {});
+  } catch (error) {
+    setMessage(String(error), true);
+  }
+});
+
+function renderHours(settings) {
+  if (settings.work_start && settings.work_end) {
+    const days = settings.work_days.map((day) => DAY_NAMES[day]).join(", ");
+    hoursSummary.textContent =
+      `${settings.work_start}–${settings.work_end} on ${days} (${settings.time_zone}) — schedules skip off-shift time`;
+  } else {
+    hoursSummary.textContent = "24/7 — no off-shift time";
+  }
+  hoursStart.value = settings.work_start ?? "08:00";
+  hoursEnd.value = settings.work_end ?? "17:00";
+  hoursTz.value = settings.time_zone ?? "UTC";
+  const selected = new Set(settings.work_days?.length ? settings.work_days : [0, 1, 2, 3, 4]);
+  hoursDays.querySelectorAll("input").forEach((box) => {
+    box.checked = selected.has(Number(box.value));
+  });
+}
+
+async function loadHours() {
+  if (window.location.protocol === "file:") {
+    return;
+  }
+  const response = await fetch("/api/plant-settings");
+  const data = await response.json();
+  if (response.ok && !data.error) {
+    renderHours(data);
+  }
+}
+
+hoursEdit.addEventListener("click", () => {
+  hoursForm.hidden = !hoursForm.hidden;
+});
+
+async function saveHours(body) {
+  hoursMsg.textContent = "Saving…";
+  try {
+    const response = await fetch("/api/plant-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      hoursMsg.textContent = data.error ?? "Save failed.";
+      return;
+    }
+    renderHours(data);
+    hoursForm.hidden = true;
+    hoursMsg.textContent = "Saved. The board re-projects around the new hours.";
+    await loadSchedule().catch(() => {});
+  } catch (error) {
+    hoursMsg.textContent = "Save failed.";
+  }
+}
+
+hoursForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const workDays = [...hoursDays.querySelectorAll("input:checked")].map((box) => Number(box.value));
+  saveHours({
+    workStart: hoursStart.value,
+    workEnd: hoursEnd.value,
+    workDays,
+    timeZone: hoursTz.value
+  });
+});
+
+hours247.addEventListener("click", () => {
+  saveHours({ workStart: null, workEnd: null, workDays: [], timeZone: hoursTz.value });
+});
+
 fillToMax.addEventListener("click", async () => {
   setMessage("Searching for the largest order that fits the window…");
   try {
@@ -297,6 +412,7 @@ createPlanned.addEventListener("click", async () => {
 });
 
 loadSchedule().catch((error) => setMessage(error.message, true));
+loadHours().catch(() => {});
 setInterval(() => {
   loadSchedule().catch(() => {});
 }, 10000);

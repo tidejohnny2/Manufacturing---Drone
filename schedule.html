@@ -64,6 +64,47 @@
         </div>
       </section>
 
+      <section class="plan-band hours-band" aria-label="Plant working hours">
+        <div class="hours-row">
+          <strong>Plant working hours:</strong>
+          <span id="hoursSummary">24/7</span>
+          <button id="hoursEdit" type="button" class="nav-link">Edit</button>
+        </div>
+        <form id="hoursForm" class="order-form schedule-form" hidden>
+          <label>
+            <span>Start</span>
+            <input id="hoursStart" type="time" />
+          </label>
+          <label>
+            <span>End</span>
+            <input id="hoursEnd" type="time" />
+          </label>
+          <fieldset id="hoursDays" class="hours-days">
+            <legend>Days</legend>
+            <label><input type="checkbox" value="0" checked />Mon</label>
+            <label><input type="checkbox" value="1" checked />Tue</label>
+            <label><input type="checkbox" value="2" checked />Wed</label>
+            <label><input type="checkbox" value="3" checked />Thu</label>
+            <label><input type="checkbox" value="4" checked />Fri</label>
+            <label><input type="checkbox" value="5" />Sat</label>
+            <label><input type="checkbox" value="6" />Sun</label>
+          </fieldset>
+          <label>
+            <span>Time zone</span>
+            <select id="hoursTz">
+              <option value="UTC" selected>UTC</option>
+              <option value="America/New_York">Eastern</option>
+              <option value="America/Chicago">Central</option>
+              <option value="America/Denver">Mountain</option>
+              <option value="America/Los_Angeles">Pacific</option>
+            </select>
+          </label>
+          <button type="submit">Save Hours</button>
+          <button type="button" id="hours247">Set 24/7</button>
+        </form>
+        <p id="hoursMsg" class="form-message" role="status"></p>
+      </section>
+
       <div id="ganttLines"></div>
     </main>
     <script src="theme.js"></script>

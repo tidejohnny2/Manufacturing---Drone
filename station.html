@@ -38,7 +38,13 @@
         </div>
         <div>
           <span>Cycle minutes (recorded)</span>
-          <strong id="cycleMinutes">—</strong>
+          <strong>
+            <span class="capacity-edit">
+              <input id="cycleInput" type="number" min="1" placeholder="—" aria-label="Cycle minutes" />
+              <button id="cycleSave" type="button">Save</button>
+            </span>
+          </strong>
+          <span id="cycleMsg" class="capacity-msg"></span>
         </div>
         <div>
           <span>Max output</span>
