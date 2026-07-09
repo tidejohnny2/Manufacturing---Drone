@@ -227,6 +227,43 @@ h2 {
   background: var(--oa-accent-tint);
 }
 
+/* Nav group: a top-bar item that opens a small dropdown (hover or focus). */
+.nav-group {
+  position: relative;
+  display: inline-flex;
+}
+
+.nav-group-btn {
+  width: 100%;
+  gap: 6px;
+}
+
+.nav-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  min-width: 170px;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
+  z-index: 40;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-group:hover .nav-menu,
+.nav-group:focus-within .nav-menu {
+  display: flex;
+}
+
+.nav-menu .nav-link {
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+}
+
 .ask-ai-button {
   display: inline-flex;
   align-items: center;
@@ -920,6 +957,10 @@ body.view-rework .shipping-route {
     flex: 1 1 150px;
   }
 
+  .controls .nav-group {
+    flex: 1 1 150px;
+  }
+
   .segmented {
     width: 100%;
   }
@@ -948,7 +989,8 @@ body.view-rework .shipping-route {
   }
 
   .bom-actions,
-  .bom-actions .nav-link {
+  .bom-actions .nav-link,
+  .bom-actions .nav-group {
     width: 100%;
   }
 
