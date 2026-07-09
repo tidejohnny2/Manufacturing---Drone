@@ -1004,12 +1004,15 @@ def fetch_operations_overview() -> dict:
             )
             shortages = cur.fetchall()
 
+            # Rolling 24h window rather than the UTC calendar day, so evening
+            # completions don't vanish from the card when UTC midnight passes.
             cur.execute(
                 """
                 SELECT m.sku, count(*) AS orders, COALESCE(sum(po.quantity), 0) AS quantity
                 FROM production_orders po
                 JOIN materials m ON m.id = po.finished_material_id
-                WHERE po.status = 'complete' AND po.updated_at::date = CURRENT_DATE
+                WHERE po.status = 'complete'
+                  AND po.updated_at >= now() - interval '24 hours'
                 GROUP BY m.sku
                 ORDER BY m.sku
                 """
@@ -1477,13 +1480,13 @@ def build_ask_ai_context() -> tuple[str, dict]:
         lines.append("Shortages: none.")
 
     if data["completed_today"]:
-        lines.append("Completed today:")
+        lines.append("Completed in the last 24 hours:")
         for completed in data["completed_today"]:
             lines.append(
                 f"- {completed['quantity']} x {completed['sku']} across {completed['orders']} order(s)"
             )
     else:
-        lines.append("Completed today: nothing yet.")
+        lines.append("Completed in the last 24 hours: nothing yet.")
 
     lines.append("Recent inventory movements (newest first):")
     for txn in data["recent_transactions"]:

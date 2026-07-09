@@ -119,7 +119,7 @@ function renderOverview(data) {
       .join(" | ");
   } else {
     completedTitle.textContent = "Nothing yet";
-    completedDetail.textContent = "Finished orders booked into stock today appear here.";
+    completedDetail.textContent = "Finished orders booked into stock in the last 24 hours appear here.";
   }
 
   activityBody.innerHTML = data.recent_transactions
