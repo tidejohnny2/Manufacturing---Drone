@@ -8,6 +8,8 @@ const previewDue = document.querySelector("#previewDue");
 const previewMessage = document.querySelector("#previewMessage");
 const previewResult = document.querySelector("#previewResult");
 const createPlanned = document.querySelector("#createPlanned");
+const fillToMax = document.querySelector("#fillToMax");
+const windowMinutes = document.querySelector("#windowMinutes");
 
 const ORDER_COLORS = ["#0284c7", "#7c3aed", "#059669", "#d97706", "#0891b2", "#c026d3", "#65a30d", "#e11d48"];
 let scheduleData = null;
@@ -103,6 +105,28 @@ function renderLine(line, now) {
     })
     .join("");
 
+  // Max output per station (recorded process math); bottleneck highlighted.
+  const maxoutRows = line.stations
+    .map(
+      (station) => `
+        <tr class="${station.bottleneck ? "bottleneck-row" : ""}">
+          <td>${esc(station.station)}${station.bottleneck ? " ★" : ""}</td>
+          <td>${station.cycle_minutes ?? "—"}</td>
+          <td>${station.capacity ?? "∞"}</td>
+          <td>${station.max_per_hour ?? "unbounded"}</td>
+        </tr>`
+    )
+    .join("");
+  const bottleneck = line.stations.find((station) => station.bottleneck);
+  const maxout = `
+    <details class="maxout">
+      <summary>Station max output${bottleneck ? ` — line ceiling ${bottleneck.max_per_hour}/hr at ${esc(bottleneck.station)} (bottleneck ★)` : ""}</summary>
+      <table class="maxout-table">
+        <thead><tr><th>Station</th><th>Cycle min</th><th>Capacity</th><th>Max units/hr</th></tr></thead>
+        <tbody>${maxoutRows}</tbody>
+      </table>
+    </details>`;
+
   const nowPos = pos(new Date(now).toISOString());
   const nowMarker = nowPos >= 0 && nowPos <= 100
     ? `<span class="gantt-now" style="left:${nowPos}%" title="now"></span>`
@@ -122,6 +146,7 @@ function renderLine(line, now) {
         <div class="gantt-axis">${ticks}</div>
       </div>
       ${nowMarker ? `<div class="gantt-nowline-note">Red line = now</div>` : ""}
+      ${maxout}
     </section>`
   );
 
@@ -176,8 +201,7 @@ function renderPreviewResult(data) {
     ${pulls}`;
 }
 
-previewForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function runPreview(prefixMessage = "") {
   setMessage("Projecting…");
   try {
     const response = await fetch("/api/schedule/preview", {
@@ -198,7 +222,42 @@ previewForm.addEventListener("submit", async (event) => {
     renderPreviewResult(data);
     renderSchedule();
     createPlanned.hidden = false;
-    setMessage("Preview shown as dashed bars on the board. Nothing has been created yet.");
+    setMessage(`${prefixMessage}Preview shown as dashed bars on the board. Nothing has been created yet.`);
+  } catch (error) {
+    setMessage(String(error), true);
+  }
+}
+
+previewForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runPreview();
+});
+
+fillToMax.addEventListener("click", async () => {
+  setMessage("Searching for the largest order that fits the window…");
+  try {
+    const response = await fetch("/api/schedule/max-output", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        finishedSku: previewSku.value,
+        windowMinutes: Number(windowMinutes.value)
+      })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      setMessage(data.error ?? "Max-output search failed.", true);
+      return;
+    }
+    if (data.max_quantity === 0) {
+      setMessage(data.note ?? "Nothing fits in that window.", true);
+      return;
+    }
+    previewQty.value = data.max_quantity;
+    await runPreview(
+      `Max output: ${data.max_quantity} unit(s) fit in the next ${data.window_minutes} min ` +
+      `(finishes ${fmtTime(data.finish)}). `
+    );
   } catch (error) {
     setMessage(String(error), true);
   }

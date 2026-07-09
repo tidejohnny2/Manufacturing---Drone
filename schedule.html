@@ -48,7 +48,12 @@
               <span>Due Date</span>
               <input id="previewDue" type="date" />
             </label>
+            <label>
+              <span>Window (min)</span>
+              <input id="windowMinutes" type="number" value="15" min="1" max="1440" />
+            </label>
             <button type="submit">Preview</button>
+            <button type="button" id="fillToMax" class="fill-to-max">Fill to Max</button>
             <button type="button" id="createPlanned" class="create-planned" hidden>Create This Order</button>
           </form>
           <p id="previewMessage" class="form-message" role="status"></p>

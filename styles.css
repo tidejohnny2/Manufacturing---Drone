@@ -1544,3 +1544,53 @@ body.view-rework .shipping-route {
     grid-template-columns: 120px minmax(0, 1fr);
   }
 }
+
+/* Station max output (schedule board) */
+.fill-to-max {
+  min-height: 40px;
+  border: 1px solid var(--oa-accent) !important;
+  background: #fff !important;
+  color: var(--oa-accent-ink) !important;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.fill-to-max:hover {
+  background: var(--oa-accent-tint) !important;
+}
+
+.maxout {
+  margin-top: 12px;
+}
+
+.maxout summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #475569;
+}
+
+.maxout-table {
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.maxout-table th,
+.maxout-table td {
+  border: 1px solid #e2e8f0;
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.maxout-table th {
+  background: #f1f5f9;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.bottleneck-row td {
+  background: #fef3c7;
+  font-weight: 800;
+}
