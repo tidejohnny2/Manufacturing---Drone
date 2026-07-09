@@ -188,6 +188,56 @@
           </table>
         </div>
       </section>
+
+      <section class="plan-band" aria-label="Chart of accounts maintenance">
+        <div class="kit-head">
+          <h2>Chart of Accounts (Maintenance)</h2>
+          <span id="accountsMsg" class="kit-verdict"></span>
+        </div>
+        <p class="kit-note">
+          Names are always editable. Type and normal side lock once an account has postings; accounts the
+          posting engine uses are protected and cannot be deleted. Every change lands in the audit trail
+          above under type "gl_account".
+        </p>
+        <form id="accountCreate" class="order-form schedule-form">
+          <label>
+            <span>Account No.</span>
+            <input id="newAccountNo" type="text" maxlength="10" placeholder="e.g. 5100" />
+          </label>
+          <label>
+            <span>Name</span>
+            <input id="newAccountName" type="text" maxlength="80" placeholder="e.g. Cost of Goods Sold" />
+          </label>
+          <label>
+            <span>Type</span>
+            <select id="newAccountType"></select>
+          </label>
+          <label>
+            <span>Normal Side</span>
+            <select id="newAccountSide">
+              <option value="debit">debit</option>
+              <option value="credit">credit</option>
+            </select>
+          </label>
+          <button type="submit">Add Account</button>
+        </form>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Acct</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Normal Side</th>
+                <th>Postings</th>
+                <th>Balance</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
     <script src="theme.js"></script>
     <script src="ask-ai.js"></script>

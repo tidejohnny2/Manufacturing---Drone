@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS station_signoffs (
 CREATE TABLE IF NOT EXISTS gl_accounts (
   account_no TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  account_type TEXT NOT NULL CHECK (account_type IN ('asset', 'liability', 'equity', 'variance')),
+  account_type TEXT NOT NULL CHECK (account_type IN ('asset', 'liability', 'equity', 'income', 'expense', 'variance')),
   normal_side TEXT NOT NULL CHECK (normal_side IN ('debit', 'credit'))
 );
 INSERT INTO gl_accounts (account_no, name, account_type, normal_side) VALUES
@@ -455,6 +455,10 @@ WHERE part_number = 'DRN-PROP-001';
 UPDATE bom_items SET substitute_part_number = 'CASE-LTC-002 (equivalent draw latch)'
 WHERE part_number = 'CASE-LTC-001';
 UPDATE process_steps SET standard_minutes = expected_minutes WHERE standard_minutes IS NULL;
+-- Chart-of-accounts maintenance: allow income/expense account types.
+ALTER TABLE gl_accounts DROP CONSTRAINT IF EXISTS gl_accounts_account_type_check;
+ALTER TABLE gl_accounts ADD CONSTRAINT gl_accounts_account_type_check
+  CHECK (account_type IN ('asset', 'liability', 'equity', 'income', 'expense', 'variance'));
 DO $$
 BEGIN
   ALTER TABLE bom_items ADD CONSTRAINT bom_items_parent_part_unique UNIQUE (parent_material_id, part_number);

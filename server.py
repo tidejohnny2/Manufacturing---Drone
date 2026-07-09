@@ -2881,6 +2881,145 @@ def set_costing_standard(payload: dict) -> dict:
     return {"itemType": item_type, "key": key, "field": field, "value": value, "actor": actor}
 
 
+# Accounts the posting engine writes to by name; they can be renamed but not
+# deleted or restructured from the maintenance form.
+PROTECTED_GL_ACCOUNTS = {
+    RM_ACCOUNT, SUBASSY_ACCOUNT, WIP_ACCOUNT, FG_ACCOUNT,
+    PAYROLL_ACCOUNT, OH_ACCOUNT, OPENING_ACCOUNT,
+    "5210", "5220", "5230", "5240", "5250", "5260",
+}
+GL_ACCOUNT_TYPES = ("asset", "liability", "equity", "income", "expense", "variance")
+
+
+def fetch_gl_accounts() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if not costing_ready(cur):
+                raise ValueError("Costing tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT a.account_no, a.name, a.account_type, a.normal_side,
+                       COUNT(l.id) AS posting_count,
+                       COALESCE(SUM(l.debit), 0) AS total_debit,
+                       COALESCE(SUM(l.credit), 0) AS total_credit
+                FROM gl_accounts a
+                LEFT JOIN cost_lines l ON l.account_no = a.account_no
+                GROUP BY a.account_no, a.name, a.account_type, a.normal_side
+                ORDER BY a.account_no
+                """
+            )
+            accounts = []
+            for row in cur.fetchall():
+                debit = float(row["total_debit"])
+                credit = float(row["total_credit"])
+                balance = round(debit - credit, 2) if row["normal_side"] == "debit" else round(credit - debit, 2)
+                accounts.append({
+                    "account_no": row["account_no"],
+                    "name": row["name"],
+                    "account_type": row["account_type"],
+                    "normal_side": row["normal_side"],
+                    "posting_count": row["posting_count"],
+                    "balance": balance,
+                    "protected": row["account_no"] in PROTECTED_GL_ACCOUNTS,
+                })
+    return {"accounts": accounts, "account_types": list(GL_ACCOUNT_TYPES)}
+
+
+def manage_gl_account(payload: dict) -> dict:
+    """Chart-of-accounts maintenance. Rules a controller would expect: names
+    are always editable; type and normal side lock once an account has
+    postings; engine accounts can't be deleted or restructured; deletes only
+    for unposted, unprotected accounts. Every change is audited."""
+    action = str(payload.get("action", "")).strip()
+    account_no = str(payload.get("accountNo", "")).strip()
+    actor = str(payload.get("actor", "")).strip() or "controller"
+    if action not in ("create", "update", "delete"):
+        raise ValueError("action must be create, update, or delete.")
+    if not account_no or len(account_no) > 10 or not account_no.replace("-", "").isalnum():
+        raise ValueError("Account number must be 1-10 letters/digits.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.account_no, a.name, a.account_type, a.normal_side,
+                       (SELECT COUNT(*) FROM cost_lines l WHERE l.account_no = a.account_no) AS postings
+                FROM gl_accounts a WHERE a.account_no = %s
+                """,
+                (account_no,),
+            )
+            existing = cur.fetchone()
+
+            def audit(field, old, new):
+                cur.execute(
+                    """
+                    INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value)
+                    VALUES (%s, 'gl_account', %s, %s, %s, %s)
+                    """,
+                    (actor, account_no, field, old, new),
+                )
+
+            if action == "create":
+                if existing:
+                    raise ValueError(f"Account {account_no} already exists.")
+                name = str(payload.get("name", "")).strip()
+                account_type = str(payload.get("accountType", "")).strip()
+                normal_side = str(payload.get("normalSide", "")).strip()
+                if not name or len(name) > 80:
+                    raise ValueError("Account name is required (max 80 chars).")
+                if account_type not in GL_ACCOUNT_TYPES:
+                    raise ValueError(f"accountType must be one of {', '.join(GL_ACCOUNT_TYPES)}.")
+                if normal_side not in ("debit", "credit"):
+                    raise ValueError("normalSide must be debit or credit.")
+                cur.execute(
+                    "INSERT INTO gl_accounts (account_no, name, account_type, normal_side) VALUES (%s, %s, %s, %s)",
+                    (account_no, name, account_type, normal_side),
+                )
+                audit("created", None, f"{name} ({account_type}/{normal_side})")
+
+            elif action == "update":
+                if not existing:
+                    raise ValueError(f"Unknown account {account_no}.")
+                locked = existing["postings"] > 0 or account_no in PROTECTED_GL_ACCOUNTS
+                name = str(payload.get("name", "")).strip()
+                account_type = str(payload.get("accountType", existing["account_type"])).strip()
+                normal_side = str(payload.get("normalSide", existing["normal_side"])).strip()
+                if not name or len(name) > 80:
+                    raise ValueError("Account name is required (max 80 chars).")
+                if account_type not in GL_ACCOUNT_TYPES:
+                    raise ValueError(f"accountType must be one of {', '.join(GL_ACCOUNT_TYPES)}.")
+                if normal_side not in ("debit", "credit"):
+                    raise ValueError("normalSide must be debit or credit.")
+                if locked and (account_type != existing["account_type"] or normal_side != existing["normal_side"]):
+                    raise ValueError(
+                        "Type and normal side are locked: the account has postings or is used by the "
+                        "posting engine. Only the name can change."
+                    )
+                if name != existing["name"]:
+                    audit("name", existing["name"], name)
+                if account_type != existing["account_type"]:
+                    audit("account_type", existing["account_type"], account_type)
+                if normal_side != existing["normal_side"]:
+                    audit("normal_side", existing["normal_side"], normal_side)
+                cur.execute(
+                    "UPDATE gl_accounts SET name = %s, account_type = %s, normal_side = %s WHERE account_no = %s",
+                    (name, account_type, normal_side, account_no),
+                )
+
+            else:  # delete
+                if not existing:
+                    raise ValueError(f"Unknown account {account_no}.")
+                if account_no in PROTECTED_GL_ACCOUNTS:
+                    raise ValueError("That account is used by the posting engine and cannot be deleted.")
+                if existing["postings"] > 0:
+                    raise ValueError("Accounts with postings cannot be deleted (the ledger is immutable).")
+                cur.execute("DELETE FROM gl_accounts WHERE account_no = %s", (account_no,))
+                audit("deleted", f"{existing['name']} ({existing['account_type']}/{existing['normal_side']})", None)
+
+        conn.commit()
+    return {"action": action, "accountNo": account_no, "actor": actor}
+
+
 # ===== Internal audit =====
 # Regularly generated audit package: every schedule from the costing working
 # papers expressed as machine-checkable assertions, fingerprinted by hash,
@@ -3972,6 +4111,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/costing/ledger",
             "/api/costing/trial-balance",
             "/api/costing/standards",
+            "/api/costing/accounts",
             "/api/audit/package",
             "/api/audit/certifications",
         ):
@@ -3988,6 +4128,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     payload = fetch_cost_ledger(order_no, limit)
                 elif path == "/api/costing/trial-balance":
                     payload = fetch_trial_balance()
+                elif path == "/api/costing/accounts":
+                    payload = fetch_gl_accounts()
                 elif path == "/api/audit/package":
                     payload = build_audit_package()
                 elif path == "/api/audit/certifications":
@@ -4036,6 +4178,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/plant-settings",
             "/api/station-signoff",
             "/api/costing/standards",
+            "/api/costing/accounts",
             "/api/audit/certify",
             "/api/schedule/preview",
             "/api/schedule/max-output",
@@ -4069,6 +4212,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/costing/standards":
                 json_response(self, HTTPStatus.OK, set_costing_standard(payload))
+                return
+            if path == "/api/costing/accounts":
+                json_response(self, HTTPStatus.OK, manage_gl_account(payload))
                 return
             if path == "/api/audit/certify":
                 json_response(self, HTTPStatus.OK, run_audit_certification(payload))

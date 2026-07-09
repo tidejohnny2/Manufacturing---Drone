@@ -274,6 +274,128 @@ async function loadStandards() {
   renderStandards(await getJson("/api/costing/standards"));
 }
 
+const accountsBody = document.querySelector("#accountsBody");
+const accountsMsg = document.querySelector("#accountsMsg");
+let accountTypes = [];
+
+function typeSelect(selected, locked) {
+  return `<select class="acct-input" data-field="accountType" ${locked ? "disabled" : ""}>${accountTypes
+    .map((t) => `<option value="${t}" ${t === selected ? "selected" : ""}>${t}</option>`)
+    .join("")}</select>`;
+}
+
+function sideSelect(selected, locked) {
+  return `<select class="acct-input" data-field="normalSide" ${locked ? "disabled" : ""}>
+    <option value="debit" ${selected === "debit" ? "selected" : ""}>debit</option>
+    <option value="credit" ${selected === "credit" ? "selected" : ""}>credit</option>
+  </select>`;
+}
+
+function renderAccounts(data) {
+  accountTypes = data.account_types;
+  const newType = document.querySelector("#newAccountType");
+  if (!newType.options.length) {
+    newType.innerHTML = accountTypes.map((t) => `<option value="${t}">${t}</option>`).join("");
+  }
+  accountsBody.innerHTML = data.accounts
+    .map((account) => {
+      const locked = account.protected || account.posting_count > 0;
+      const lockNote = account.protected
+        ? '<span class="kit-chip kit-serialized" title="Used by the posting engine">ENGINE</span>'
+        : account.posting_count > 0
+          ? '<span class="kit-chip kit-not-stocked" title="Has postings">POSTED</span>'
+          : "";
+      return `
+        <tr data-account="${esc(account.account_no)}">
+          <td>${esc(account.account_no)} ${lockNote}</td>
+          <td><input class="acct-input acct-name" data-field="name" maxlength="80" value="${esc(account.name)}" /></td>
+          <td>${typeSelect(account.account_type, locked)}</td>
+          <td>${sideSelect(account.normal_side, locked)}</td>
+          <td>${account.posting_count}</td>
+          <td>${money(account.balance)}</td>
+          <td>
+            <button type="button" class="std-save acct-save">Save</button>
+            ${!locked ? '<button type="button" class="acct-delete">Delete</button>' : ""}
+          </td>
+        </tr>`;
+    })
+    .join("");
+}
+
+async function loadAccounts() {
+  renderAccounts(await getJson("/api/costing/accounts"));
+}
+
+async function accountAction(body, successText) {
+  accountsMsg.textContent = "Saving…";
+  accountsMsg.className = "kit-verdict";
+  body.actor = document.querySelector("#standardsActor").value.trim();
+  try {
+    const response = await fetch("/api/costing/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      accountsMsg.textContent = data.error ?? "Save failed.";
+      accountsMsg.classList.add("kit-hold");
+      return false;
+    }
+    accountsMsg.textContent = successText;
+    accountsMsg.classList.add("kit-release");
+    await loadAccounts();
+    await loadStandards();
+    return true;
+  } catch (error) {
+    accountsMsg.textContent = "Save failed.";
+    accountsMsg.classList.add("kit-hold");
+    return false;
+  }
+}
+
+document.querySelector("#accountCreate").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const created = await accountAction(
+    {
+      action: "create",
+      accountNo: document.querySelector("#newAccountNo").value.trim(),
+      name: document.querySelector("#newAccountName").value.trim(),
+      accountType: document.querySelector("#newAccountType").value,
+      normalSide: document.querySelector("#newAccountSide").value
+    },
+    "Account added."
+  );
+  if (created) {
+    document.querySelector("#newAccountNo").value = "";
+    document.querySelector("#newAccountName").value = "";
+  }
+});
+
+accountsBody.addEventListener("click", async (event) => {
+  const row = event.target.closest("tr[data-account]");
+  if (!row) {
+    return;
+  }
+  const accountNo = row.dataset.account;
+  if (event.target.closest(".acct-save")) {
+    const body = { action: "update", accountNo, name: row.querySelector('[data-field="name"]').value.trim() };
+    const type = row.querySelector('[data-field="accountType"]');
+    const side = row.querySelector('[data-field="normalSide"]');
+    if (!type.disabled) {
+      body.accountType = type.value;
+      body.normalSide = side.value;
+    }
+    await accountAction(body, `Saved ${accountNo}.`);
+  }
+  if (event.target.closest(".acct-delete")) {
+    if (!window.confirm(`Delete account ${accountNo}? Only possible while it has no postings.`)) {
+      return;
+    }
+    await accountAction({ action: "delete", accountNo }, `Deleted ${accountNo}.`);
+  }
+});
+
 async function loadJournal() {
   const filter = journalFilter.value.trim();
   const path = filter
@@ -293,6 +415,7 @@ async function loadAll() {
   renderCards(await getJson("/api/costing/cost-cards"));
   await loadLive();
   await loadStandards();
+  await loadAccounts();
 }
 
 document.querySelector("main").addEventListener("click", async (event) => {

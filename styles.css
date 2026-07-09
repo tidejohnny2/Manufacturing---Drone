@@ -2014,6 +2014,38 @@ body.view-rework .shipping-route {
   background: var(--oa-accent-hover);
 }
 
+.acct-input {
+  min-height: 30px;
+  padding: 2px 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+}
+
+.acct-input:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.acct-name {
+  width: 100%;
+  min-width: 180px;
+}
+
+.acct-delete {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #fecaca;
+  background: #fff;
+  color: #dc2626;
+  font-weight: 800;
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.acct-delete:hover {
+  background: #fef2f2;
+}
+
 @media (max-width: 1100px) {
   .cost-cards,
   .tb-grid {
