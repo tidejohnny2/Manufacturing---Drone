@@ -1734,3 +1734,158 @@ body.view-rework .shipping-route {
   color: var(--oa-accent);
   border-bottom-style: solid;
 }
+
+/* --- Production support: kit check, operator script, signoffs, records --- */
+
+.kit-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kit-head h2 {
+  margin: 0;
+}
+
+.kit-note,
+.labor-note {
+  margin: 8px 0 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.kit-verdict {
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.kit-verdict.kit-release {
+  color: #047857;
+}
+
+.kit-verdict.kit-hold {
+  color: #dc2626;
+}
+
+.kit-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+
+.kit-chip.kit-available {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+.kit-chip.kit-short {
+  background: #fef2f2;
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.kit-chip.kit-substitute {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+
+.kit-chip.kit-not-stocked {
+  background: #f1f5f9;
+  color: #64748b;
+  border-color: #cbd5e1;
+}
+
+.kit-chip.kit-serialized {
+  background: var(--oa-accent-tint);
+  color: var(--oa-accent-ink);
+  border-color: var(--oa-accent);
+}
+
+.script-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.script-grid article {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  padding: 12px 14px;
+}
+
+.script-grid article > span {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 8px 0 4px;
+}
+
+.script-grid article > span:first-child {
+  margin-top: 0;
+}
+
+.script-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.script-list li {
+  padding: 3px 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.signoff-form {
+  margin-top: 12px;
+}
+
+.signoff-pass,
+.signoff-fail {
+  min-height: 40px;
+  border: 0;
+  font-weight: 800;
+  cursor: pointer;
+  color: #fff;
+}
+
+.signoff-pass {
+  background: #047857;
+}
+
+.signoff-pass:hover {
+  background: #065f46;
+}
+
+.signoff-fail {
+  background: #dc2626;
+}
+
+.signoff-fail:hover {
+  background: #b91c1c;
+}
+
+.labor-line-title {
+  margin: 14px 0 8px;
+  font-size: 0.9rem;
+}
+
+.labor-total-row td {
+  background: var(--oa-accent-tint);
+}
+
+@media (max-width: 900px) {
+  .script-grid {
+    grid-template-columns: 1fr;
+  }
+}

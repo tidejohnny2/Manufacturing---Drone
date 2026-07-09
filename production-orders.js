@@ -16,6 +16,11 @@ const materialsBody = document.querySelector("#materialsBody");
 const activityList = document.querySelector("#activityList");
 const ledgerBody = document.querySelector("#ledgerBody");
 const historyBody = document.querySelector("#historyBody");
+const recordsBody = document.querySelector("#recordsBody");
+const kitCheckButton = document.querySelector("#kitCheck");
+const kitVerdict = document.querySelector("#kitVerdict");
+const kitWrap = document.querySelector("#kitWrap");
+const kitBody = document.querySelector("#kitBody");
 // Deep link: floor-map dashboard cards open this page pinned to one order.
 let selectedOrderNo = new URLSearchParams(window.location.search).get("order");
 
@@ -68,6 +73,8 @@ function renderSnapshot(snapshot) {
     materialsBody.innerHTML = "";
     activityList.innerHTML = "";
     ledgerBody.innerHTML = "";
+    recordsBody.innerHTML =
+      '<tr><td colspan="7">Production records appear here when the order completes.</td></tr>';
     return;
   }
 
@@ -143,7 +150,64 @@ function renderSnapshot(snapshot) {
       `
     )
     .join("");
+
+  recordsBody.innerHTML = (snapshot.records ?? []).length
+    ? snapshot.records
+        .map(
+          (row) => `
+            <tr>
+              <td>${row.serial_no}</td>
+              <td>${row.sku}</td>
+              <td>${row.firmware_version ?? "—"}</td>
+              <td>${titleCase(row.inspection_result)}</td>
+              <td>${row.rework_count}</td>
+              <td>${row.final_location ?? "—"}</td>
+              <td>${new Date(row.created_at).toLocaleString()}</td>
+            </tr>
+          `
+        )
+        .join("")
+    : '<tr><td colspan="7">Production records appear here when the order completes.</td></tr>';
 }
+
+kitCheckButton.addEventListener("click", async () => {
+  kitVerdict.textContent = "Checking…";
+  kitVerdict.className = "kit-verdict";
+  try {
+    const sku = encodeURIComponent(finishedGoodSelect.value);
+    const qty = encodeURIComponent(quantityInput.value || "1");
+    const response = await fetch(`/api/kit-check?sku=${sku}&qty=${qty}`);
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      kitVerdict.textContent = data.error ?? "Kit check failed.";
+      return;
+    }
+    kitBody.innerHTML = data.kit
+      .map(
+        (line) => `
+          <tr>
+            <td>${line.part_number}</td>
+            <td>${line.description}</td>
+            <td>${line.check_zone ?? "—"}</td>
+            <td>${line.required} ${line.unit}</td>
+            <td>${line.available ?? "—"}</td>
+            <td>${line.serialized ? '<span class="kit-chip kit-serialized">SERIALIZED</span>' : ""}</td>
+            <td>${line.substitute ?? ""}</td>
+            <td><span class="kit-chip kit-${line.status.replace(" ", "-")}">${line.status.toUpperCase()}</span></td>
+          </tr>
+        `
+      )
+      .join("");
+    kitWrap.hidden = false;
+    const s = data.summary;
+    kitVerdict.textContent =
+      `${data.verdict} — ${s.available} available, ${s.short} short, ${s.substitute} on substitute, ` +
+      `${s.serialized} serialized (${data.finished_good} × ${data.quantity})`;
+    kitVerdict.classList.add(data.verdict === "RELEASE" ? "kit-release" : "kit-hold");
+  } catch (error) {
+    kitVerdict.textContent = "Kit check failed.";
+  }
+});
 
 function formatDateTime(value) {
   return value ? new Date(value).toLocaleString() : "";

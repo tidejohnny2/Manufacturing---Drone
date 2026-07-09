@@ -212,6 +212,16 @@ VALUES
   (11, 'CASE-LBL-001', 'Case label and badge set', 'Finishing', 1, 'set', 'cws4', NULL, 'buy', 'Serial badge and compliance labels'),
   (6, 'CASE-FG-500', 'Drone transport case', 'Packaging', 1, 'each', 'fg', 'case_inventory', 'make', 'Manufactured carry case pulled from Case Inventory at drone packaging');
 
+-- Material-release attributes: serialized parts and approved substitutes.
+-- (schema.sql runs these too, but on a fresh database the BOM rows only exist
+-- after the inserts above, so they must run again here.)
+UPDATE bom_items SET serialized = TRUE
+WHERE part_number IN ('DRN-MTR-001', 'DRN-ESC-001', 'DRN-FC-001', 'DRN-BAT-001', 'CASE-FG-500');
+UPDATE bom_items SET substitute_part_number = 'DRN-PROP-002 (alt vendor matched set)'
+WHERE part_number = 'DRN-PROP-001';
+UPDATE bom_items SET substitute_part_number = 'CASE-LTC-002 (equivalent draw latch)'
+WHERE part_number = 'CASE-LTC-001';
+
 SELECT create_production_order('CASE-PO-1001', 2, '2026-06-12', '2026-06-04', 'CASE-FG-500');
 SELECT create_production_order('DRN-PO-1001', 1, '2026-06-14', '2026-06-04');
 

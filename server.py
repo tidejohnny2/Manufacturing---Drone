@@ -19,6 +19,8 @@ ACTIVE_STATUSES = ("planned", "released", "in_progress", "hold")
 DEFAULT_FINISHED_SKU = "DRN-FG-600"
 ORDER_PREFIXES = {"DRN-FG-600": "DRN-PO-", "CASE-FG-500": "CASE-PO-"}
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+# Stamped on drone build records at completion (cases carry no firmware).
+DRONE_FIRMWARE_VERSION = os.environ.get("DRONE_FIRMWARE_VERSION", "FW 4.2.1")
 ASK_AI_SYSTEM = (
     "You are the Ask AI assistant embedded in the Operations Overview of a drone "
     "manufacturing demo plant. The plant has two production lines: the drone floor "
@@ -564,6 +566,27 @@ def post_completion_inventory(cur, order: dict, final_zone_id: str) -> None:
         (order["id"], final_zone_id, order["finished_good"], order["quantity"], order["order_no"]),
     )
 
+    # Traceable build: one production record per finished unit.
+    firmware = DRONE_FIRMWARE_VERSION if order["finished_good"] == "DRN-FG-600" else None
+    for unit in range(1, order["quantity"] + 1):
+        cur.execute(
+            """
+            INSERT INTO production_records (
+              production_order_id, serial_no, sku, firmware_version,
+              inspection_result, rework_count, final_zone_id
+            )
+            VALUES (%s, %s, %s, %s, 'pass', 0, %s)
+            ON CONFLICT (serial_no) DO NOTHING
+            """,
+            (
+                order["id"],
+                f"SN-{order['order_no']}-{unit:03d}",
+                order["finished_good"],
+                firmware,
+                final_zone_id,
+            ),
+        )
+
     # Newly stocked finished goods satisfy waiting short pull lines (oldest
     # order first), so a replenishment case order landing in Case Inventory
     # automatically allocates to the drone order that triggered it.
@@ -795,7 +818,7 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
                 )
                 order = cur.fetchone()
                 if not order:
-                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
+                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": [], "records": []}
                 active_orders = fetch_active_orders(cur)
                 if not any(active["id"] == order["id"] for active in active_orders):
                     active_orders.append(order)
@@ -807,7 +830,7 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
                     if route_steps:
                         active_states.extend(simulated_pipeline_state(facility_orders, route_steps, calendar))
                 if not active_states:
-                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
+                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": [], "records": []}
                 selected_state = next(
                     (state for state in active_states if state["order"]["id"] == order["id"]),
                     active_states[-1],
@@ -815,7 +838,7 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
             else:
                 active_states = simulate_active_states(cur)
                 if not active_states:
-                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": []}
+                    return {"order": None, "balances": [], "materials": [], "activity": [], "ledger": [], "records": []}
                 selected_state = next(
                     (
                         state
@@ -875,12 +898,26 @@ def fetch_order_snapshot(order_no: str | None = None) -> dict:
             )
             ledger = cur.fetchall()
 
+            cur.execute(
+                """
+                SELECT pr.serial_no, pr.sku, pr.firmware_version, pr.inspection_result,
+                       pr.rework_count, z.name AS final_location, pr.created_at
+                FROM production_records pr
+                LEFT JOIN zones z ON z.id = pr.final_zone_id
+                WHERE pr.production_order_id = %s
+                ORDER BY pr.serial_no
+                """,
+                (selected_order_id,),
+            )
+            records = cur.fetchall()
+
     return {
         "order": order,
         "balances": balances,
         "materials": materials,
         "activity": activity,
         "ledger": ledger,
+        "records": records,
     }
 
 
@@ -1649,6 +1686,30 @@ def fetch_station(zone_id: str) -> dict:
             )
             ledger = cur.fetchall()
 
+            # Standard script: structured operator prompts from the plan row,
+            # plus recent signoffs recorded at this station.
+            plan = load_plan_row(zone_id)
+            script = None
+            if plan:
+                script = {
+                    "setup": [item.strip() for item in plan["tools_support"].split(";") if item.strip()],
+                    "steps": [item.strip() for item in plan["work_script"].split(";") if item.strip()],
+                    "hold_point": plan["material_pull"],
+                    "pass_fail": plan["quality_gate"],
+                    "signoff_role": plan["primary_role"],
+                }
+            cur.execute(
+                """
+                SELECT operator, result, notes, order_no, created_at
+                FROM station_signoffs
+                WHERE zone_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 8
+                """,
+                (zone_id,),
+            )
+            signoffs = cur.fetchall()
+
     return {
         "now": now.isoformat(),
         "zone": {
@@ -1668,7 +1729,9 @@ def fetch_station(zone_id: str) -> dict:
         },
         "parts": parts,
         "bom_work": bom_work,
-        "plan": load_plan_row(zone_id),
+        "plan": plan,
+        "script": script,
+        "signoffs": signoffs,
         "ledger": ledger,
     }
 
@@ -1825,6 +1888,158 @@ def set_zone_cycle(payload: dict) -> dict:
         conn.commit()
 
     return {"zoneId": zone_id, "name": zone["name"], "minutes": minutes}
+
+
+def fetch_labor_standards() -> dict:
+    """Labor standard per station: direct minutes from the routing plan plus
+    indirect adders (material handling, QA review, rework disposition)."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT category, description, pct FROM labor_overheads ORDER BY category")
+            overheads = cur.fetchall()
+
+    pct_total = sum(float(overhead["pct"]) for overhead in overheads)
+    lines = {"drone": [], "case": []}
+    plan_path = BASE_DIR / "production-plan.csv"
+    if plan_path.exists():
+        with open(plan_path, newline="", encoding="utf-8") as plan_file:
+            for row in csv.DictReader(plan_file):
+                direct = float(row["labor_minutes"])
+                entry = {
+                    "seq": int(row["seq"]),
+                    "station": row["station"],
+                    "operation_type": row["operation_type"],
+                    "role": row["primary_role"],
+                    "direct_minutes": direct,
+                    "indirect": {
+                        overhead["category"]: round(direct * float(overhead["pct"]) / 100, 1)
+                        for overhead in overheads
+                    },
+                    "indirect_minutes": round(direct * pct_total / 100, 1),
+                    "standard_minutes": round(direct * (1 + pct_total / 100), 1),
+                }
+                lines["drone" if entry["seq"] < 100 else "case"].append(entry)
+
+    totals = {
+        key: {
+            "direct": round(sum(row["direct_minutes"] for row in rows), 1),
+            "indirect": round(sum(row["indirect_minutes"] for row in rows), 1),
+            "standard": round(sum(row["standard_minutes"] for row in rows), 1),
+        }
+        for key, rows in lines.items()
+    }
+    return {"overheads": overheads, "overhead_pct_total": pct_total, "lines": lines, "totals": totals}
+
+
+def kit_check(finished_sku: str, quantity: int) -> dict:
+    """Material release: every BOM line's availability before a build starts,
+    with serialized parts and approved substitutes called out."""
+    if quantity <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            finished = resolve_finished_good(cur, finished_sku)
+            cur.execute(
+                """
+                SELECT bi.part_number, bi.description, bi.category, bi.quantity, bi.unit,
+                       bi.serialized, bi.substitute_part_number,
+                       z.name AS check_zone, i.quantity_available
+                FROM bom_items bi
+                LEFT JOIN zones z ON z.id = COALESCE(bi.source_zone_id, bi.station_zone_id)
+                LEFT JOIN inventory_items i
+                  ON i.location_zone_id = COALESCE(bi.source_zone_id, bi.station_zone_id)
+                 AND i.part_number = bi.part_number
+                WHERE bi.parent_material_id = %s AND bi.part_number <> %s
+                ORDER BY bi.id
+                """,
+                (finished["material_id"], finished_sku),
+            )
+            kit = []
+            for row in cur.fetchall():
+                required = float(row["quantity"]) * quantity
+                available = (
+                    float(row["quantity_available"]) if row["quantity_available"] is not None else None
+                )
+                if available is None:
+                    status = "not stocked"
+                elif available >= required:
+                    status = "available"
+                elif row["substitute_part_number"]:
+                    status = "substitute"
+                else:
+                    status = "short"
+                kit.append(
+                    {
+                        "part_number": row["part_number"],
+                        "description": row["description"],
+                        "check_zone": row["check_zone"],
+                        "required": required,
+                        "unit": row["unit"],
+                        "available": available,
+                        "serialized": row["serialized"],
+                        "substitute": row["substitute_part_number"],
+                        "status": status,
+                    }
+                )
+
+    shorts = sum(1 for line in kit if line["status"] == "short")
+    return {
+        "finished_good": finished_sku,
+        "quantity": quantity,
+        "kit": kit,
+        "summary": {
+            "lines": len(kit),
+            "available": sum(1 for line in kit if line["status"] == "available"),
+            "short": shorts,
+            "substitute": sum(1 for line in kit if line["status"] == "substitute"),
+            "not_stocked": sum(1 for line in kit if line["status"] == "not stocked"),
+            "serialized": sum(1 for line in kit if line["serialized"]),
+        },
+        "verdict": "RELEASE" if shorts == 0 else "HOLD",
+    }
+
+
+def record_station_signoff(payload: dict) -> dict:
+    """Operator signoff against a station's standard script."""
+    zone_id = str(payload.get("zoneId", "")).strip()
+    operator = str(payload.get("operator", "")).strip()
+    result = str(payload.get("result", "")).strip()
+    notes = str(payload.get("notes", "")).strip()
+    order_no = str(payload.get("orderNo", "")).strip()
+    if result not in ("pass", "fail"):
+        raise ValueError("Result must be pass or fail.")
+    if not operator:
+        raise ValueError("Operator name is required for signoff.")
+    if len(operator) > 80 or len(notes) > 400:
+        raise ValueError("Signoff text is too long.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM zones WHERE id = %s", (zone_id,))
+            if not cur.fetchone():
+                raise ValueError("Unknown zone.")
+            cur.execute(
+                """
+                INSERT INTO station_signoffs (zone_id, order_no, operator, result, notes)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (zone_id, order_no or None, operator, result, notes),
+            )
+            conn.commit()
+            cur.execute(
+                """
+                SELECT operator, result, notes, order_no, created_at
+                FROM station_signoffs
+                WHERE zone_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 8
+                """,
+                (zone_id,),
+            )
+            signoffs = cur.fetchall()
+
+    return {"zoneId": zone_id, "recorded": True, "signoffs": signoffs}
 
 
 def fetch_plant_settings() -> dict:
@@ -2173,6 +2388,22 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
+        if path == "/api/labor-standards":
+            try:
+                json_response(self, HTTPStatus.OK, fetch_labor_standards())
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        if path == "/api/kit-check":
+            try:
+                finished_sku = query.get("sku", [DEFAULT_FINISHED_SKU])[0] or DEFAULT_FINISHED_SKU
+                quantity = int(query.get("qty", ["1"])[0])
+                json_response(self, HTTPStatus.OK, kit_check(finished_sku, quantity))
+            except ValueError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
         if path == "/api/station":
             try:
                 zone_id = query.get("zone", [""])[0].strip()
@@ -2196,6 +2427,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/zone-cycle",
             "/api/order-priority",
             "/api/plant-settings",
+            "/api/station-signoff",
             "/api/schedule/preview",
             "/api/schedule/max-output",
         ):
@@ -2222,6 +2454,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/plant-settings":
                 json_response(self, HTTPStatus.OK, set_plant_settings(payload))
+                return
+            if path == "/api/station-signoff":
+                json_response(self, HTTPStatus.OK, record_station_signoff(payload))
                 return
             if path == "/api/ask-ai":
                 json_response(self, HTTPStatus.OK, ask_ai(payload))
