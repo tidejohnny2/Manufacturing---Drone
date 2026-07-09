@@ -67,13 +67,20 @@
   }
 
   function inline(value) {
-    return value.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    return value
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
   }
 
   function render(markdown) {
     const lines = esc(markdown).replace(/\r/g, "").split("\n");
     const isSeparator = (line) => /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(line);
     const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+    const listItem = (line) => {
+      const match = line.match(/^(\s*)([-*•]|\d+[.)])\s+(.*)$/);
+      return match ? { indent: match[1].length, ordered: /^\d/.test(match[2]), text: match[3] } : null;
+    };
     let html = "";
     let i = 0;
     while (i < lines.length) {
@@ -93,18 +100,37 @@
         html += "</tbody></table></div>";
         continue;
       }
-      const bullet = line.trim().match(/^(-|\*|•)\s+(.*)$/);
-      if (bullet) {
-        html += "<ul>";
-        while (i < lines.length) {
-          const item = lines[i].trim().match(/^(-|\*|•)\s+(.*)$/);
-          if (!item) {
-            break;
-          }
-          html += "<li>" + inline(item[2]) + "</li>";
+      const heading = line.match(/^#{1,4}\s+(.*)$/);
+      if (heading) {
+        html += "<div class=\"ask-h\">" + inline(heading[1]) + "</div>";
+        i++;
+        continue;
+      }
+      if (listItem(line)) {
+        const items = [];
+        while (i < lines.length && listItem(lines[i])) {
+          items.push(listItem(lines[i]));
           i++;
         }
-        html += "</ul>";
+        const topTag = items[0].ordered ? "ol" : "ul";
+        html += "<" + topTag + ">";
+        let j = 0;
+        while (j < items.length) {
+          const item = items[j];
+          let li = inline(item.text);
+          j++;
+          if (j < items.length && items[j].indent > item.indent) {
+            const subTag = items[j].ordered ? "ol" : "ul";
+            li += "<" + subTag + ">";
+            while (j < items.length && items[j].indent > item.indent) {
+              li += "<li>" + inline(items[j].text) + "</li>";
+              j++;
+            }
+            li += "</" + subTag + ">";
+          }
+          html += "<li>" + li + "</li>";
+        }
+        html += "</" + topTag + ">";
         continue;
       }
       if (line.trim()) {
@@ -260,5 +286,5 @@
   }
 
   // Exposed for DOM-level testing.
-  window.__askAi = { actionsCard, bubble, handleResponse };
+  window.__askAi = { actionsCard, bubble, handleResponse, render };
 })();

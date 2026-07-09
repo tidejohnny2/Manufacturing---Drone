@@ -1227,9 +1227,48 @@ body.view-rework .shipping-route {
   background: #f1f5f9;
 }
 
-.ask-bubble ul {
-  margin: 6px 0;
+.ask-bubble ul,
+.ask-bubble ol {
+  margin: 6px 0 8px;
   padding-left: 18px;
+}
+
+.ask-bubble li {
+  margin: 3px 0;
+}
+
+.ask-bubble li > ul,
+.ask-bubble li > ol {
+  margin: 3px 0 0;
+}
+
+.ask-bubble p {
+  margin: 0 0 8px;
+}
+
+.ask-bubble p:last-child {
+  margin-bottom: 0;
+}
+
+.ask-bubble .ask-h {
+  margin: 10px 0 4px;
+  color: #334155;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ask-bubble .ask-h:first-child {
+  margin-top: 0;
+}
+
+.ask-bubble code {
+  padding: 0 4px;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  background: #eef2f7;
+  font-size: 0.85em;
 }
 
 .ask-chips {
