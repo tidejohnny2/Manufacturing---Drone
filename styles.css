@@ -1001,13 +1001,17 @@ body.view-rework .shipping-route {
   align-content: start;
 }
 
+/* Active panels tint light rose (user request): the station currently
+   holding WIP is the strongest rose; stations the order already passed
+   through get a fainter wash. Idle stations stay neutral. */
 .pipeline-station.busy {
-  background: var(--oa-accent-tint);
-  border-color: var(--oa-accent);
+  background: #ffe4e6;
+  border-color: #fda4af;
 }
 
 .pipeline-station.done {
-  background: #f1f5f9;
+  background: #fff1f2;
+  border-color: #fecdd3;
 }
 
 .pipeline-station-name {
