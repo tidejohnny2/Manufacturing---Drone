@@ -1939,6 +1939,22 @@ body.view-rework .shipping-route {
   align-items: start;
 }
 
+/* Inside the side-by-side grid, tables must fit their column instead of
+   inheriting the page-wide 1120px table minimum (which painted across the
+   neighboring column). */
+.tb-grid > * {
+  min-width: 0;
+}
+
+.tb-grid .bom-table {
+  min-width: 0;
+}
+
+.tb-grid .bom-table th,
+.tb-grid .bom-table td {
+  white-space: normal;
+}
+
 .control-list {
   list-style: none;
   margin: 0;
