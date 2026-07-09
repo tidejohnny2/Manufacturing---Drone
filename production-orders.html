@@ -74,6 +74,35 @@
         </div>
       </section>
 
+      <section class="plan-band" aria-label="Material release kit check">
+        <div class="kit-head">
+          <h2>Material Release — Kit Check</h2>
+          <button id="kitCheck" type="button" class="fill-to-max">Check Kit</button>
+          <span id="kitVerdict" class="kit-verdict"></span>
+        </div>
+        <p class="kit-note">
+          Checks every BOM line for the finished good and quantity above before the build starts:
+          available, short, substitute-defined, and serialized parts.
+        </p>
+        <div class="bom-table-wrap" id="kitWrap" hidden>
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Part Number</th>
+                <th>Description</th>
+                <th>Check Zone</th>
+                <th>Required</th>
+                <th>Available</th>
+                <th>Serialized</th>
+                <th>Substitute</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="kitBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="bom-summary production-summary order-summary" aria-label="Production order summary">
         <div>
           <span>Active order</span>
@@ -174,6 +203,25 @@
             </tr>
           </thead>
           <tbody id="ledgerBody">
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Production records">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Serial No.</th>
+              <th>SKU</th>
+              <th>Firmware</th>
+              <th>Inspection</th>
+              <th>Rework</th>
+              <th>Final Location</th>
+              <th>Recorded</th>
+            </tr>
+          </thead>
+          <tbody id="recordsBody">
+            <tr><td colspan="7">Production records appear here when the order completes.</td></tr>
           </tbody>
         </table>
       </section>

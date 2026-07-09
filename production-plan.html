@@ -314,32 +314,46 @@
         </table>
       </section>
 
-      <section class="plan-band" aria-label="Production support needs">
-        <h2>Other Stuff To Define</h2>
+      <section class="plan-band" aria-label="Labor standards">
+        <h2>Labor Standards (Direct + Support)</h2>
+        <p class="labor-note" id="laborNote">
+          Direct labor per station from the routing plan, plus indirect adders for material handling,
+          QA review, and rework disposition.
+        </p>
+        <div id="laborTables"></div>
+      </section>
+
+      <section class="plan-band" aria-label="Production support features">
+        <h2>Production Support — Live</h2>
         <div class="plan-cards">
           <article>
             <span>Labor standard</span>
             <strong>Direct + support</strong>
-            <p>Track direct labor by station and add indirect time for material handling, QA review, and rework disposition.</p>
+            <p>Direct labor by station with indirect adders for material handling, QA review, and rework
+               disposition — see the Labor Standards table above.</p>
           </article>
           <article>
             <span>Material release</span>
             <strong>Shortage visible</strong>
-            <p>Before a build starts, the kit should show available, short, substituted, and serialized parts.</p>
+            <p>The <a class="strip-link" href="production-orders.html">Orders page</a> kit check shows every
+               part as available, short, substitute-defined, or serialized before a build starts.</p>
           </article>
           <article>
             <span>Standard script</span>
             <strong>Operator prompts</strong>
-            <p>Each station needs a script with setup, action steps, hold points, pass/fail checks, and signoff.</p>
+            <p>Every <a class="strip-link" href="station.html?zone=ws1">station page</a> carries its operator
+               script: setup, action steps, hold point, pass/fail gate, and a recorded signoff.</p>
           </article>
           <article>
             <span>Production records</span>
             <strong>Traceable build</strong>
-            <p>Capture serial number, firmware version, inspection results, rework history, and final inventory location.</p>
+            <p>Each completed unit gets a serial number, firmware version, inspection result, rework count,
+               and final location on the <a class="strip-link" href="production-orders.html">order detail</a>.</p>
           </article>
         </div>
       </section>
     </main>
     <script src="theme.js"></script>
+    <script src="production-plan.js"></script>
   </body>
 </html>

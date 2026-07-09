@@ -137,6 +137,46 @@
         </div>
       </section>
 
+      <section class="plan-band" aria-label="Standard operator script">
+        <h2>Standard Script &amp; Signoff</h2>
+        <div id="scriptWrap" class="script-grid">
+          <p>No standard script is defined for this station.</p>
+        </div>
+        <form id="signoffForm" class="order-form schedule-form signoff-form">
+          <label>
+            <span>Operator</span>
+            <input id="signoffOperator" type="text" maxlength="80" placeholder="Name or badge" />
+          </label>
+          <label>
+            <span>Order (optional)</span>
+            <input id="signoffOrder" type="text" maxlength="40" placeholder="DRN-PO-…" />
+          </label>
+          <label>
+            <span>Notes</span>
+            <input id="signoffNotes" type="text" maxlength="400" placeholder="Optional notes" />
+          </label>
+          <button type="button" id="signoffPass" class="signoff-pass">Signoff PASS</button>
+          <button type="button" id="signoffFail" class="signoff-fail">Signoff FAIL</button>
+        </form>
+        <p id="signoffMsg" class="form-message" role="status"></p>
+        <div class="bom-table-wrap station-bom-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Operator</th>
+                <th>Result</th>
+                <th>Order</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody id="signoffBody">
+              <tr><td colspan="5">No signoffs recorded yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="bom-table-wrap" aria-label="Recent station activity">
         <table class="bom-table">
           <thead>

@@ -112,6 +112,35 @@ function renderStation() {
         .join("")
     : '<tr><td colspan="6">No BOM lines are installed at this station.</td></tr>';
 
+  // Render the script once per page load so the 12s refresh doesn't wipe an
+  // operator's checked-off steps; the script itself is static per station.
+  const scriptWrap = document.querySelector("#scriptWrap");
+  if (data.script && !scriptWrap.dataset.rendered) {
+    scriptWrap.dataset.rendered = "true";
+    const checklist = (items) =>
+      items.map((item) => `<li><label><input type="checkbox" /> ${esc(item)}</label></li>`).join("");
+    scriptWrap.innerHTML = `
+      <article>
+        <span>Setup</span>
+        <ul class="script-list">${checklist(data.script.setup)}</ul>
+      </article>
+      <article>
+        <span>Action steps</span>
+        <ul class="script-list">${checklist(data.script.steps)}</ul>
+      </article>
+      <article>
+        <span>Hold point — verify staged materials</span>
+        <p>${esc(data.script.hold_point)}</p>
+        <span>Pass / fail check</span>
+        <p><strong>${esc(data.script.pass_fail)}</strong></p>
+        <span>Signoff by</span>
+        <p>${esc(data.script.signoff_role)}</p>
+      </article>`;
+  } else if (!data.script) {
+    scriptWrap.innerHTML = "<p>No standard script is defined for this station.</p>";
+  }
+  renderSignoffs(data.signoffs ?? []);
+
   const ledgerBody = document.querySelector("#ledgerBody");
   ledgerBody.innerHTML = data.ledger.length
     ? data.ledger
@@ -130,6 +159,55 @@ function renderStation() {
         .join("")
     : '<tr><td colspan="7">No activity recorded yet.</td></tr>';
 }
+
+function renderSignoffs(signoffs) {
+  const body = document.querySelector("#signoffBody");
+  body.innerHTML = signoffs.length
+    ? signoffs
+        .map(
+          (row) => `
+            <tr>
+              <td>${new Date(row.created_at).toLocaleString()}</td>
+              <td>${esc(row.operator)}</td>
+              <td><span class="kit-chip ${row.result === "pass" ? "kit-available" : "kit-short"}">${row.result.toUpperCase()}</span></td>
+              <td>${esc(row.order_no ?? "")}</td>
+              <td>${esc(row.notes)}</td>
+            </tr>`
+        )
+        .join("")
+    : '<tr><td colspan="5">No signoffs recorded yet.</td></tr>';
+}
+
+async function submitSignoff(result) {
+  const message = document.querySelector("#signoffMsg");
+  message.textContent = "Recording…";
+  try {
+    const response = await fetch("/api/station-signoff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        zoneId,
+        result,
+        operator: document.querySelector("#signoffOperator").value.trim(),
+        orderNo: document.querySelector("#signoffOrder").value.trim(),
+        notes: document.querySelector("#signoffNotes").value.trim()
+      })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      message.textContent = data.error ?? "Signoff failed.";
+      return;
+    }
+    message.textContent = `Recorded ${result.toUpperCase()} signoff.`;
+    document.querySelector("#signoffNotes").value = "";
+    renderSignoffs(data.signoffs);
+  } catch (error) {
+    message.textContent = "Signoff failed.";
+  }
+}
+
+document.querySelector("#signoffPass").addEventListener("click", () => submitSignoff("pass"));
+document.querySelector("#signoffFail").addEventListener("click", () => submitSignoff("fail"));
 
 async function loadStation() {
   if (window.location.protocol === "file:" || !zoneId) {
