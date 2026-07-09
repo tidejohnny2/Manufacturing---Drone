@@ -3633,6 +3633,7 @@ AGENT_WRITE_TOOLS = {
     "create_production_order", "move_order", "set_station_capacity",
     "set_cycle_minutes", "set_working_hours", "set_standard",
     "record_signoff", "run_audit",
+    "create_customer", "create_sales_order", "ship_invoice",
 }
 _AGENT_MAX_STEPS = 6
 _AGENT_SESSION_TTL = 2 * 60 * 60
@@ -3729,6 +3730,32 @@ AGENT_TOOL_SPECS = [
     {"name": "run_audit",
      "description": "Run the internal audit: build the evidence package, certify it, and store the certification immutably.",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_sales",
+     "description": "Sales snapshot: customers, list prices, finished-goods stock, sales orders (with fulfillability), and the invoice register with margins. Read-only. Use to resolve customer names and SO numbers before acting.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "create_customer",
+     "description": "Add a new customer (master data).",
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string"},
+         "contact": {"type": "string"},
+         "terms": {"type": "string", "description": "e.g. Net 30 (default)."}},
+         "required": ["name"]}},
+    {"name": "create_sales_order",
+     "description": "Create a sales order for a customer. Lines take the list price unless unitPrice is given. Resolve the customer with get_sales first.",
+     "input_schema": {"type": "object", "properties": {
+         "customerName": {"type": "string", "description": "Full or distinctive partial customer name."},
+         "requestedDate": {"type": "string", "description": "Optional YYYY-MM-DD."},
+         "lines": {"type": "array", "items": {"type": "object", "properties": {
+             "sku": {"type": "string", "enum": ["DRN-FG-600", "CASE-FG-500"]},
+             "quantity": {"type": "integer", "minimum": 1},
+             "unitPrice": {"type": "number", "minimum": 0}},
+             "required": ["sku", "quantity"]}}},
+         "required": ["customerName", "lines"]}},
+    {"name": "ship_invoice",
+     "description": "Ship a full open sales order from finished stock and invoice it: AR/Sales at price, COGS relieving stock at the current standard. Requires the full order quantity in stock.",
+     "input_schema": {"type": "object", "properties": {
+         "soNo": {"type": "string", "description": "e.g. SO-1002"}},
+         "required": ["soNo"]}},
 ]
 
 
@@ -3747,6 +3774,9 @@ def _agent_system() -> str:
         "- The costing system is standard absorption costing; positive variances are "
         "unfavorable. Zone ids: drone line receiving, raw, ws1..ws5, fg, inventory; "
         "case line case_receiving, case_raw, cws1..cws4, case_fg, case_inventory.\n"
+        "- Sales: resolve customers and sales orders with get_sales before acting; "
+        "ship_invoice requires the FULL order quantity in finished stock and posts "
+        "AR/Sales at price and COGS at the current standard.\n"
         "- Be concise and operational; resolve relative dates to YYYY-MM-DD. "
         f"Today is {datetime.now(timezone.utc).date().isoformat()} (UTC)."
     )
@@ -3837,6 +3867,41 @@ def _agent_exec_run_audit(args: dict) -> dict:
         "assertion_summary", "package_hash")}
 
 
+def _agent_exec_get_sales(args: dict) -> dict:
+    data = fetch_sales()
+    return {
+        "customers": [{"id": c["id"], "name": c["name"], "terms": c["terms"]} for c in data["customers"]],
+        "price_list": data["price_list"],
+        "finished_stock": data["stock"],
+        "orders": [
+            {key: order.get(key) for key in ("so_no", "customer", "status", "subtotal", "can_fulfill", "lines")}
+            for order in data["orders"]
+        ],
+        "invoices": data["invoices"],
+    }
+
+
+def _agent_exec_create_sales_order(args: dict) -> dict:
+    name = str(args.get("customerName", "")).strip().lower()
+    if not name:
+        return {"status": "error", "message": "customerName is required."}
+    customers = fetch_sales()["customers"]
+    matches = [c for c in customers if name in c["name"].lower()]
+    if not matches:
+        return {"status": "error",
+                "message": f"No customer matching '{args.get('customerName')}'. Known: "
+                           + ", ".join(c["name"] for c in customers)}
+    if len(matches) > 1:
+        return {"status": "error",
+                "message": "Ambiguous customer name; matches: " + ", ".join(c["name"] for c in matches)}
+    result = create_sales_order({
+        "customerId": matches[0]["id"],
+        "requestedDate": args.get("requestedDate", ""),
+        "lines": args.get("lines") or [],
+    })
+    return {"status": "created", "customer": matches[0]["name"], **result}
+
+
 AGENT_EXECUTORS = {
     "get_schedule": _agent_exec_get_schedule,
     "get_station": _agent_exec_get_station,
@@ -3857,6 +3922,10 @@ AGENT_EXECUTORS = {
     "set_standard": lambda args: set_costing_standard({**args, "actor": "Ask AI (approved)"}),
     "record_signoff": lambda args: record_station_signoff(args),
     "run_audit": _agent_exec_run_audit,
+    "get_sales": _agent_exec_get_sales,
+    "create_customer": lambda args: manage_customer({**args, "action": "create"}),
+    "create_sales_order": _agent_exec_create_sales_order,
+    "ship_invoice": lambda args: ship_and_invoice(args),
 }
 
 
@@ -3899,6 +3968,13 @@ def agent_summarize(name: str, args: dict) -> str:
                 f"by {a.get('operator')}")
     if name == "run_audit":
         return "Run the internal audit and store a certification"
+    if name == "create_customer":
+        return f"Add customer **{a.get('name')}** ({a.get('terms') or 'Net 30'})"
+    if name == "create_sales_order":
+        lines = ", ".join(f"{l.get('quantity')} × {l.get('sku')}" for l in (a.get("lines") or []))
+        return f"Create sales order for **{a.get('customerName')}**: {lines}"
+    if name == "ship_invoice":
+        return f"Ship & invoice sales order **{a.get('soNo')}** (relieves stock, posts AR/Sales/COGS)"
     return f"{name}({json.dumps(a, default=str)})"
 
 
