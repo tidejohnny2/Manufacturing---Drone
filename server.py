@@ -3844,7 +3844,34 @@ def receive_vendor_po(payload: dict) -> dict:
                 )
                 bin_row = cur.fetchone()
                 if not bin_row:
-                    raise ValueError(f"No inventory bin exists for {part}.")
+                    # First receipt of a never-stocked part: create its bin at
+                    # the BOM source zone so the kit check can see the stock.
+                    cur.execute(
+                        """
+                        SELECT description, unit,
+                               COALESCE(source_zone_id, station_zone_id) AS zone_id
+                        FROM bom_items
+                        WHERE part_number = %s
+                          AND COALESCE(source_zone_id, station_zone_id) IS NOT NULL
+                        ORDER BY id LIMIT 1
+                        """,
+                        (part,),
+                    )
+                    bom = cur.fetchone()
+                    if not bom:
+                        raise ValueError(f"No inventory bin or BOM entry exists for {part}.")
+                    cur.execute(
+                        """
+                        INSERT INTO inventory_items
+                          (area, location_zone_id, item_name, part_number, quantity_on_hand,
+                           quantity_allocated, unit, min_quantity, max_quantity, status, control_note)
+                        VALUES ('Parts', %s, %s, %s, 0, 0, %s, 0, 0, 'Ready', %s)
+                        RETURNING id, location_zone_id, unit
+                        """,
+                        (bom["zone_id"], bom["description"], part, bom["unit"],
+                         f"Bin created by receiving {po_no}"),
+                    )
+                    bin_row = cur.fetchone()
                 cur.execute(
                     "UPDATE inventory_items SET quantity_on_hand = quantity_on_hand + %s, updated_at = now() WHERE id = %s",
                     (quantity, bin_row["id"]),
