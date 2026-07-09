@@ -3403,6 +3403,43 @@ def _price_at_qty(base_price: float, breaks: list[dict], quantity: int) -> float
     return round(price, 2)
 
 
+def _ensure_part_bin(cur, part: str, note: str) -> dict:
+    """Return the part's first inventory bin, creating one at the BOM source
+    zone (Parts area, zero stock) for never-stocked parts."""
+    cur.execute(
+        "SELECT id, location_zone_id, unit FROM inventory_items WHERE part_number = %s ORDER BY id LIMIT 1",
+        (part,),
+    )
+    bin_row = cur.fetchone()
+    if bin_row:
+        return bin_row
+    cur.execute(
+        """
+        SELECT description, unit,
+               COALESCE(source_zone_id, station_zone_id) AS zone_id
+        FROM bom_items
+        WHERE part_number = %s
+          AND COALESCE(source_zone_id, station_zone_id) IS NOT NULL
+        ORDER BY id LIMIT 1
+        """,
+        (part,),
+    )
+    bom = cur.fetchone()
+    if not bom:
+        raise ValueError(f"No inventory bin or BOM entry exists for {part}.")
+    cur.execute(
+        """
+        INSERT INTO inventory_items
+          (area, location_zone_id, item_name, part_number, quantity_on_hand,
+           quantity_allocated, unit, min_quantity, max_quantity, status, control_note)
+        VALUES ('Parts', %s, %s, %s, 0, 0, %s, 0, 0, 'Ready', %s)
+        RETURNING id, location_zone_id, unit
+        """,
+        (bom["zone_id"], bom["description"], part, bom["unit"], note),
+    )
+    return cur.fetchone()
+
+
 def fetch_purchasing() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -3685,6 +3722,8 @@ def set_part_min_max(payload: dict) -> dict:
         raise ValueError("Max must be at least the min (or zero for no cap).")
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
+            # Never-stocked parts get their bin created so the policy sticks.
+            _ensure_part_bin(cur, part, "Bin created by min/max policy")
             cur.execute(
                 """
                 UPDATE inventory_items
@@ -3693,8 +3732,6 @@ def set_part_min_max(payload: dict) -> dict:
                 """,
                 (min_q, max_q, part),
             )
-            if cur.rowcount == 0:
-                raise ValueError(f"No inventory bins found for {part}.")
         conn.commit()
     return {"partNumber": part, "minQuantity": min_q, "maxQuantity": max_q}
 
@@ -3846,32 +3883,7 @@ def receive_vendor_po(payload: dict) -> dict:
                 if not bin_row:
                     # First receipt of a never-stocked part: create its bin at
                     # the BOM source zone so the kit check can see the stock.
-                    cur.execute(
-                        """
-                        SELECT description, unit,
-                               COALESCE(source_zone_id, station_zone_id) AS zone_id
-                        FROM bom_items
-                        WHERE part_number = %s
-                          AND COALESCE(source_zone_id, station_zone_id) IS NOT NULL
-                        ORDER BY id LIMIT 1
-                        """,
-                        (part,),
-                    )
-                    bom = cur.fetchone()
-                    if not bom:
-                        raise ValueError(f"No inventory bin or BOM entry exists for {part}.")
-                    cur.execute(
-                        """
-                        INSERT INTO inventory_items
-                          (area, location_zone_id, item_name, part_number, quantity_on_hand,
-                           quantity_allocated, unit, min_quantity, max_quantity, status, control_note)
-                        VALUES ('Parts', %s, %s, %s, 0, 0, %s, 0, 0, 'Ready', %s)
-                        RETURNING id, location_zone_id, unit
-                        """,
-                        (bom["zone_id"], bom["description"], part, bom["unit"],
-                         f"Bin created by receiving {po_no}"),
-                    )
-                    bin_row = cur.fetchone()
+                    bin_row = _ensure_part_bin(cur, part, f"Bin created by receiving {po_no}")
                 cur.execute(
                     "UPDATE inventory_items SET quantity_on_hand = quantity_on_hand + %s, updated_at = now() WHERE id = %s",
                     (quantity, bin_row["id"]),
@@ -3963,6 +3975,18 @@ def imap_configured() -> bool:
         and os.environ.get("IMAP_USER")
         and os.environ.get("IMAP_PASSWORD")
     )
+
+
+def _mailbox_error_text(exc: Exception) -> str:
+    """Human-readable mailbox errors: decode imaplib's bytes messages and
+    point Gmail auth failures at app passwords."""
+    parts = []
+    for arg in getattr(exc, "args", None) or []:
+        parts.append(arg.decode("utf-8", "replace") if isinstance(arg, (bytes, bytearray)) else str(arg))
+    text = " ".join(parts).strip() or str(exc)
+    if "AUTHENTICATIONFAILED" in text.upper():
+        text += " — Gmail rejects regular passwords for IMAP; create an app password at myaccount.google.com/apppasswords."
+    return text
 
 
 def _decode_mime_header(value) -> str:
@@ -4360,7 +4384,10 @@ def run_intake_cycle(poll_mailbox: bool = True) -> dict:
         conn.commit()
     fetched = 0
     if poll_mailbox and imap_configured():
-        fetched = fetch_mailbox()
+        try:
+            fetched = fetch_mailbox()
+        except Exception as exc:
+            raise ValueError(f"Mailbox check failed: {_mailbox_error_text(exc)}") from exc
     drafted = process_new_emails()
     shipped = process_backorders()
     result = {"fetched": fetched, "drafted": drafted, "shipped": [s["invoiceNo"] for s in shipped]}
@@ -4375,7 +4402,10 @@ def intake_worker() -> None:
         try:
             run_intake_cycle()
         except Exception as exc:
-            _intake_note(last_poll=datetime.now(timezone.utc).isoformat(), last_error=str(exc))
+            _intake_note(
+                last_poll=datetime.now(timezone.utc).isoformat(),
+                last_error=_mailbox_error_text(exc),
+            )
         time.sleep(INTAKE_POLL_SECONDS)
 
 
