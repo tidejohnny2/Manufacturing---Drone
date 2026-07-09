@@ -2036,6 +2036,48 @@ body.view-rework .shipping-route {
   color: #0f172a;
 }
 
+.journal-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.journal-controls select,
+.journal-controls input {
+  min-height: 34px;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+}
+
+.journal-clear {
+  min-height: 34px;
+  padding: 4px 12px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #475569;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.journal-clear:hover {
+  background: var(--oa-accent-tint);
+}
+
+.journal-more {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.journal-more .fill-to-max {
+  padding: 0 14px;
+}
+
 .actor-label {
   display: inline-flex;
   align-items: center;

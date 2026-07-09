@@ -5,6 +5,11 @@ const controlList = document.querySelector("#controlList");
 const tbNote = document.querySelector("#tbNote");
 const journalBody = document.querySelector("#journalBody");
 const journalFilter = document.querySelector("#journalFilter");
+const journalType = document.querySelector("#journalType");
+const journalFrom = document.querySelector("#journalFrom");
+const journalTo = document.querySelector("#journalTo");
+const journalOlder = document.querySelector("#journalOlder");
+const journalCount = document.querySelector("#journalCount");
 const accountsBody = document.querySelector("#accountsBody");
 const accountsMsg = document.querySelector("#accountsMsg");
 
@@ -63,15 +68,41 @@ function renderTrialBalance(data) {
   }/${data.controls.length} PASS</span>`;
 }
 
+// Journal state: the loaded page(s) plus whether older entries remain.
+// "paged" pauses the 15s auto-refresh so loaded history isn't yanked away.
+const journalState = { entries: [], hasMore: false, paged: false };
+
+const JOURNAL_TYPE_LABELS = { cogs: "COGS", dm_issue: "DM Issue", fg_transfer: "FG Transfer" };
+
+function journalTypeLabel(value) {
+  return JOURNAL_TYPE_LABELS[value] ?? titleCase(value);
+}
+
+function syncJournalTypes(types) {
+  const current = journalType.value;
+  journalType.innerHTML =
+    '<option value="">All types</option>' +
+    types
+      .map((t) => `<option value="${esc(t)}" ${t === current ? "selected" : ""}>${journalTypeLabel(t)}</option>`)
+      .join("");
+}
+
 function renderJournal(data) {
-  journalBody.innerHTML = data.entries.length
-    ? data.entries
+  if (data) {
+    journalState.entries = data.entries;
+    journalState.hasMore = Boolean(data.has_more);
+    if (data.event_types) {
+      syncJournalTypes(data.event_types);
+    }
+  }
+  journalBody.innerHTML = journalState.entries.length
+    ? journalState.entries
         .map((entry) => {
           const first = `
             <tr class="journal-entry-row">
               <td>${new Date(entry.posted_at).toLocaleString()}</td>
               <td>${esc(entry.event_ref)}</td>
-              <td>${titleCase(entry.event_type)}</td>
+              <td>${journalTypeLabel(entry.event_type)}</td>
               <td>${esc(entry.order_no ?? "")}</td>
               <td colspan="3">${esc(entry.memo)}</td>
             </tr>`;
@@ -89,7 +120,12 @@ function renderJournal(data) {
           return first + lines;
         })
         .join("")
-    : '<tr><td colspan="7">No journal entries yet.</td></tr>';
+    : '<tr><td colspan="7">No matching journal entries.</td></tr>';
+  journalOlder.hidden = !journalState.hasMore;
+  journalCount.textContent = journalState.entries.length
+    ? `Showing ${journalState.entries.length} ${journalState.entries.length === 1 ? "entry" : "entries"}` +
+      (journalState.hasMore ? " — older entries remain in the ledger." : " — end of the ledger.")
+    : "";
 }
 
 let accountTypes = [];
@@ -221,17 +257,49 @@ accountsBody.addEventListener("click", async (event) => {
   }
 });
 
+function journalQuery(beforeId) {
+  const params = new URLSearchParams({ limit: "30" });
+  const order = journalFilter.value.trim();
+  if (order) {
+    params.set("orderNo", order);
+  }
+  if (journalType.value) {
+    params.set("eventType", journalType.value);
+  }
+  if (journalFrom.value) {
+    params.set("dateFrom", journalFrom.value);
+  }
+  if (journalTo.value) {
+    params.set("dateTo", journalTo.value);
+  }
+  if (beforeId) {
+    params.set("beforeId", beforeId);
+  }
+  return `/api/costing/ledger?${params}`;
+}
+
 async function loadJournal() {
-  const filter = journalFilter.value.trim();
-  const path = filter
-    ? `/api/costing/ledger?orderNo=${encodeURIComponent(filter)}&limit=40`
-    : "/api/costing/ledger?limit=30";
-  renderJournal(await getJson(path));
+  journalState.paged = false;
+  renderJournal(await getJson(journalQuery(null)));
+}
+
+async function loadOlderJournal() {
+  const last = journalState.entries[journalState.entries.length - 1];
+  if (!last) {
+    return;
+  }
+  const data = await getJson(journalQuery(last.id));
+  journalState.paged = true;
+  data.entries = journalState.entries.concat(data.entries);
+  renderJournal(data);
 }
 
 async function loadLive() {
   renderTrialBalance(await getJson("/api/costing/trial-balance"));
-  await loadJournal();
+  // Skip the journal refresh once the user has paged into history.
+  if (!journalState.paged) {
+    await loadJournal();
+  }
 }
 
 async function loadAll() {
@@ -239,7 +307,21 @@ async function loadAll() {
   await loadAccounts();
 }
 
-journalFilter.addEventListener("change", () => {
+for (const control of [journalFilter, journalType, journalFrom, journalTo]) {
+  control.addEventListener("change", () => {
+    loadJournal().catch(() => {});
+  });
+}
+
+journalOlder.addEventListener("click", () => {
+  loadOlderJournal().catch(() => {});
+});
+
+document.querySelector("#journalClear").addEventListener("click", () => {
+  journalFilter.value = "";
+  journalType.value = "";
+  journalFrom.value = "";
+  journalTo.value = "";
   loadJournal().catch(() => {});
 });
 
