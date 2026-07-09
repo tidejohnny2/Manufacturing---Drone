@@ -2635,12 +2635,17 @@ def fetch_cost_ledger(
             if date_to:
                 clauses.append("e.posted_at < %s::date + 1")
                 params.append(date_to)
+            # Total matching the filters (paging cursor excluded) for
+            # "Showing X of N" in the journal browser.
+            filter_where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            cur.execute(f"SELECT count(*) AS n FROM cost_entries e {filter_where}", params)
+            total = cur.fetchone()["n"]
             if before_id is not None:
                 clauses.append("e.id < %s")
                 params.append(before_id)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             # Fetch one extra row to learn whether older entries remain.
-            params.append(limit + 1)
+            params = params + [limit + 1]
             cur.execute(
                 f"""
                 SELECT e.id, e.event_ref, e.order_no, e.event_type, e.memo, e.posted_at
@@ -2673,7 +2678,7 @@ def fetch_cost_ledger(
                 entry["lines"] = lines_by_entry.get(entry["id"], [])
             cur.execute("SELECT DISTINCT event_type FROM cost_entries ORDER BY event_type")
             event_types = [row["event_type"] for row in cur.fetchall()]
-    return {"entries": entries, "has_more": has_more, "event_types": event_types}
+    return {"entries": entries, "has_more": has_more, "total": total, "event_types": event_types}
 
 
 def fetch_trial_balance() -> dict:

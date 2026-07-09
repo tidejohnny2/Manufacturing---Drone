@@ -13,9 +13,9 @@
           <p class="eyebrow">Accounting</p>
           <h1>General Ledger</h1>
           <p class="bom-intro">
-            The general ledger control: live trial balance with control tie-outs, the full cost journal
-            (every posting on the immutable double-entry ledger), and chart of accounts maintenance.
-            Cost cards, WIP valuation, variances, and standards live on the Costing page.
+            The general ledger control: live trial balance with control tie-outs and chart of accounts
+            maintenance. The full cost journal browser lives on the Journals page; cost cards, WIP
+            valuation, variances, and standards on the Costing page.
           </p>
         </div>
         <div class="bom-actions">
@@ -31,6 +31,7 @@
             <button type="button" class="nav-link nav-group-btn" aria-haspopup="true">Accounting &#9662;</button>
             <div class="nav-menu">
               <a class="nav-link" href="accounting.html">General Ledger</a>
+              <a class="nav-link" href="journals.html">Journals</a>
               <a class="nav-link" href="audit.html">Audit</a>
             </div>
           </div>
@@ -72,33 +73,6 @@
             <ul class="control-list" id="controlList"></ul>
             <p class="kit-note" id="tbNote"></p>
           </div>
-        </div>
-      </section>
-
-      <section class="plan-band" aria-label="Cost journal">
-        <div class="kit-head">
-          <h2>Cost Journal (Audit Trail)</h2>
-          <div class="journal-controls">
-            <select id="journalType" aria-label="Entry type">
-              <option value="">All types</option>
-            </select>
-            <input id="journalFrom" type="date" aria-label="Posted from (UTC)" title="Posted from (UTC)" />
-            <input id="journalTo" type="date" aria-label="Posted to (UTC)" title="Posted to (UTC)" />
-            <input id="journalFilter" type="text" placeholder="Order / invoice no…" class="journal-filter" />
-            <button type="button" id="journalClear" class="journal-clear">Clear</button>
-          </div>
-        </div>
-        <div class="bom-table-wrap">
-          <table class="bom-table journal-table">
-            <thead>
-              <tr><th>Posted</th><th>Ref</th><th>Type</th><th>Order</th><th>Account</th><th>Debit</th><th>Credit</th></tr>
-            </thead>
-            <tbody id="journalBody"></tbody>
-          </table>
-        </div>
-        <div class="journal-more">
-          <button type="button" id="journalOlder" class="fill-to-max" hidden>Load older entries</button>
-          <span id="journalCount" class="kit-note"></span>
         </div>
       </section>
 
