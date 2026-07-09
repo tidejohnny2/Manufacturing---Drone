@@ -1657,7 +1657,8 @@ def fetch_station(zone_id: str) -> dict:
             "bottleneck": bottleneck,
         },
         "schedule": schedule,
-        "idle_at": idle_at.isoformat() if idle_at else None,
+        # schedule entries carry ISO strings, so idle_at already is one.
+        "idle_at": idle_at,
         "utilization": {
             "busy_pct_last_hour": round(busy_seconds_last_hour / 36, 1),
             "units_in_24h": float(ledger_sums["units_in"]),
