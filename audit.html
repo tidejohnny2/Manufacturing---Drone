@@ -78,7 +78,118 @@
         </div>
       </section>
     </main>
+    <script>
+      window.HELP_TOPICS = {
+        page: "Internal Audit",
+        topics: [
+          {
+            title: "What this page is",
+            body:
+              "<p>The plant's internal audit of the standard costing cycle. The evidence package is " +
+              "regenerated live from the books every time it is viewed or certified — trial balance, every " +
+              "journal entry, cost cards, variances, controls, the standards change log, and non-routine " +
+              "entries — each expressed as a pass/fail assertion.</p>" +
+              "<p>A scheduled run certifies the books automatically <strong>every day at 06:00 UTC</strong>; " +
+              "you can also certify on demand with <em>Run Internal Audit</em>.</p>"
+          },
+          {
+            title: "Running and printing an audit",
+            body:
+              "<p><strong>Run Internal Audit</strong> builds the evidence package, sends it to the LLM " +
+              "auditor for independent cross-checking, and stores the resulting certification permanently. " +
+              "It usually takes under a minute.</p>" +
+              "<p><strong>Print Report</strong> produces the paper copy: the page chrome is stripped and the " +
+              "opinion, assertions, and certification history print cleanly.</p>"
+          },
+          {
+            title: "Reading the opinion",
+            body:
+              "<ul>" +
+              "<li><strong>UNQUALIFIED</strong> — every recomputation agreed and no material inconsistencies; " +
+              "the books are fairly stated on the standard cost basis.</li>" +
+              "<li><strong>QUALIFIED</strong> — immaterial or clearly scoped exceptions were noted; read the " +
+              "findings for what to address.</li>" +
+              "<li><strong>ADVERSE</strong> — a material misstatement or failed control; investigate " +
+              "immediately (see “If a check fails”).</li>" +
+              "</ul>" +
+              "<p>The metadata line shows who ran it, the mode, how many assertions passed, and the package hash.</p>"
+          },
+          {
+            title: "The evidence assertions (ID glossary)",
+            body:
+              "<ul>" +
+              "<li><strong>A-TB-*</strong> — trial balance: total debits equal total credits.</li>" +
+              "<li><strong>A-JE-*</strong> — journal entries: every entry balances; entry references are unique.</li>" +
+              "<li><strong>A-CT-*</strong> — the six live tie-out controls from the Costing page (books in " +
+              "balance, entries balanced, WIP/case/drone GL ties, ledger immutability).</li>" +
+              "<li><strong>A-CC-*</strong> — cost cards: DM + DL + OH equals the unit standard for each product.</li>" +
+              "<li><strong>A-VR-*</strong> — variances: PPV + usage + labor rate + labor efficiency + overhead " +
+              "equals the total for every completed order, and drone unit PPV is constant across order sizes.</li>" +
+              "</ul>" +
+              "<p>Each row shows the expected value, the actual value, and PASS/FAIL. Money comparisons " +
+              "tolerate one cent of rounding.</p>"
+          },
+          {
+            title: "The package hash",
+            body:
+              "<p>Every package is fingerprinted with a SHA-256 hash of its full contents. The stored " +
+              "certification carries that hash, so each opinion is tied to <em>exactly</em> the evidence it " +
+              "certified — change a single cent anywhere and the fingerprint changes.</p>"
+          },
+          {
+            title: "Certification modes: claude vs offline",
+            body:
+              "<p><strong>claude</strong> — the LLM auditor independently reperforms the work before opining: " +
+              "it refoots the trial balance, verifies every entry, rebuilds both cost cards from the standards " +
+              "inputs (including the case card rolling into the drone card), and verifies every variance " +
+              "identity. It can also raise findings of its own beyond the built-in assertions.</p>" +
+              "<p><strong>offline</strong> — when no LLM is available, a deterministic self-certification runs " +
+              "from the assertions alone: material failures (trial balance or entry balance) produce ADVERSE; " +
+              "other failures QUALIFIED; a clean set UNQUALIFIED.</p>"
+          },
+          {
+            title: "Why history can't be edited",
+            body:
+              "<p>Certifications — like the cost ledger itself — are protected by a database trigger that " +
+              "rejects any modification (<em>“Cost ledger entries are immutable”</em>). They also survive " +
+              "Reset Activity: the demo floor can be wiped, the audit history cannot.</p>" +
+              "<p>Corrections are made the proper way: by posting a new, memo'd adjusting journal entry — " +
+              "never by altering what was recorded.</p>"
+          },
+          {
+            title: "The accounting basis",
+            body:
+              "<p>Standard absorption costing. Raw materials are carried at actual cost with purchase price " +
+              "variance recognized at issue; WIP and finished stock are carried at standard; direct labor uses " +
+              "per-role standard rates; overhead is applied at 25% of direct labor. Positive variances are " +
+              "unfavorable; favorable amounts show in parentheses on the Costing page.</p>"
+          },
+          {
+            title: "If a check fails",
+            body:
+              "<ol>" +
+              "<li>Read the certification findings and the failing assertion's expected vs actual values.</li>" +
+              "<li>Open the <a href='costing.html'>Costing page</a>: the six controls there show the same " +
+              "tie-outs with live detail, and the journal lets you filter entries by order.</li>" +
+              "<li>Check the standards change audit log — a standards edit mid-order briefly unsettles the " +
+              "WIP tie until affected orders complete (it self-heals; revaluation entries keep stock tied).</li>" +
+              "<li>Correct genuine misstatements with an adjusting journal entry, then re-run the audit — the " +
+              "new certification will reference the corrected package.</li>" +
+              "</ol>"
+          },
+          {
+            title: "Known scope limits",
+            body:
+              "<p>Raw Materials has no physical tie-out: buy-part bins are not decremented in this demo, so " +
+              "account 1310 reflects costing issues only (it is internally consistent but not comparable to " +
+              "bin counts). This is disclosed in the package basis and treated as an accepted scope " +
+              "limitation, not an exception.</p>"
+          }
+        ]
+      };
+    </script>
     <script src="theme.js"></script>
     <script src="audit.js"></script>
+    <script src="help.js"></script>
   </body>
 </html>
