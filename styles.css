@@ -1722,3 +1722,15 @@ body.view-rework .shipping-route {
   background: var(--oa-accent-tint);
   color: var(--oa-accent-ink);
 }
+
+/* Dashboard-strip drill-down links (floor maps) */
+.strip-link {
+  color: var(--oa-accent-ink);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--oa-accent);
+}
+
+.strip-link:hover {
+  color: var(--oa-accent);
+  border-bottom-style: solid;
+}

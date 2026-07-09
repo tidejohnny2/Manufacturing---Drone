@@ -990,6 +990,7 @@ def fetch_floor_dashboard(facility_id: int = 1) -> dict:
                 "active_orders": len(active_states),
                 "active_quantity": sum(state["order"]["quantity"] for state in active_states),
                 "display_order_no": display_state["order"]["order_no"],
+                "current_zone_id": display_state["order"]["current_zone_id"],
                 "current_zone": display_state["order"]["current_zone"],
                 "production_status": display_state["order"]["production_status"],
                 "percent_complete": display_state["order"]["percent_complete"],

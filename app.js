@@ -189,6 +189,22 @@ function renderMetricNode(node, row) {
   }
 }
 
+// Dashboard-strip drill-down: render a card value as a link when it has a
+// pertinent detail page (order detail, station detail), plain text otherwise.
+function setDashboardValue(node, text, href, tooltip) {
+  node.textContent = "";
+  if (!href) {
+    node.textContent = text;
+    return;
+  }
+  const link = document.createElement("a");
+  link.className = "strip-link";
+  link.href = href;
+  link.title = tooltip;
+  link.textContent = text;
+  node.appendChild(link);
+}
+
 function renderDashboard(data) {
   dashboardByZone = {};
   capacityByZone = data.capacities ?? capacityByZone;
@@ -197,9 +213,22 @@ function renderDashboard(data) {
   });
 
   if (data.summary) {
-    dashboardOrder.textContent = data.summary.display_order_no ?? "None";
-    dashboardStatus.textContent = titleCase(data.summary.production_status ?? "none");
-    dashboardStation.textContent = data.summary.current_zone ?? "No active order";
+    const orderNo = data.summary.display_order_no;
+    const orderHref = orderNo ? `production-orders.html?order=${encodeURIComponent(orderNo)}` : null;
+    setDashboardValue(dashboardOrder, orderNo ?? "None", orderHref, "Open order detail");
+    setDashboardValue(
+      dashboardStatus,
+      titleCase(data.summary.production_status ?? "none"),
+      orderHref,
+      "Open order detail"
+    );
+    const zoneId = data.summary.current_zone_id;
+    setDashboardValue(
+      dashboardStation,
+      data.summary.current_zone ?? "No active order",
+      zoneId && zoneId !== "queue" ? `station.html?zone=${encodeURIComponent(zoneId)}` : null,
+      "Open station detail"
+    );
     dashboardProgress.textContent = `${data.summary.percent_complete ?? 0}%`;
     dashboardUtilization.textContent = `${data.summary.actual_time_utilization_percent ?? 0}%`;
   }

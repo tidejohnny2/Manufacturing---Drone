@@ -16,7 +16,8 @@ const materialsBody = document.querySelector("#materialsBody");
 const activityList = document.querySelector("#activityList");
 const ledgerBody = document.querySelector("#ledgerBody");
 const historyBody = document.querySelector("#historyBody");
-let selectedOrderNo = null;
+// Deep link: floor-map dashboard cards open this page pinned to one order.
+let selectedOrderNo = new URLSearchParams(window.location.search).get("order");
 
 const balanceNotes = {
   "Receiving": "Testing start point: initial order balance can sit here before Kitting release.",
