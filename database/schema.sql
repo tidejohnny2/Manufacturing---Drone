@@ -422,6 +422,7 @@ ALTER TABLE zones ADD COLUMN IF NOT EXISTS capacity INTEGER;
 ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 1000;
 ALTER TABLE bom_items ADD COLUMN IF NOT EXISTS serialized BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE bom_items ADD COLUMN IF NOT EXISTS substitute_part_number TEXT;
+ALTER TABLE process_steps ADD COLUMN IF NOT EXISTS standard_minutes INTEGER;
 -- Serialized parts (captured on build records) and approved substitutes.
 -- Idempotent; also re-run by seed.sql so fresh databases get the same flags.
 UPDATE bom_items SET serialized = TRUE
