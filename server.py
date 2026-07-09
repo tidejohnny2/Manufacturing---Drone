@@ -2397,13 +2397,27 @@ def post_completion_costing(cur, order, costing, card) -> None:
         (order["id"], WIP_ACCOUNT),
     )
     posted_wip = round(float(cur.fetchone()["wip_balance"]), 2)
-    fg_amount = posted_wip if posted_wip > 0 else round(wip_std + dl_applied + oh_applied, 2)
+    if posted_wip <= 0:
+        posted_wip = round(wip_std + dl_applied + oh_applied, 2)
+    # Stock always enters at the CURRENT standard; any difference against what
+    # was absorbed (a standard edited mid-flight) posts to Standards
+    # Revaluation, so the stock-at-standard tie-outs hold through changes.
+    stock_value = round(card["unit_std"] * quantity, 2)
     stock_account = FG_ACCOUNT if order["finished_good"] == "DRN-FG-600" else SUBASSY_ACCOUNT
+    fg_lines = [(stock_account, stock_value, 0), (WIP_ACCOUNT, 0, posted_wip)]
+    revaluation = round(posted_wip - stock_value, 2)
+    if revaluation > 0:
+        # Absorbed more than current-standard stock value: expense the excess.
+        fg_lines.append(("5260", revaluation, 0))
+    elif revaluation < 0:
+        # Absorbed less: stock enters higher than cost, credit the difference.
+        fg_lines.append(("5260", 0, -revaluation))
     post_cost_entry(
         cur, f"PO{order['id']}-FG", order["id"], order["order_no"], "fg_transfer",
-        f"{order['order_no']} transferred to finished stock at standard",
-        [(stock_account, fg_amount, 0), (WIP_ACCOUNT, 0, fg_amount)],
+        f"{order['order_no']} transferred to finished stock at current standard",
+        fg_lines,
     )
+    fg_amount = posted_wip
 
     cur.execute(
         """
@@ -2805,6 +2819,19 @@ def set_costing_standard(payload: dict) -> dict:
             existing = cur.fetchone()
             if not existing:
                 raise ValueError(f"Unknown {item_type}: {key}")
+
+            # Snapshot the standard cost cards before the change so on-hand
+            # finished stock can be revalued to the new standard.
+            costing_before = load_costing(cur)
+            cards_before = (
+                {
+                    "CASE-FG-500": cost_card(cur, costing_before, "CASE-FG-500")["unit_std"],
+                    "DRN-FG-600": cost_card(cur, costing_before, "DRN-FG-600")["unit_std"],
+                }
+                if costing_before and field == "standard"
+                else None
+            )
+
             cur.execute(
                 f"UPDATE {table} SET {column} = %s, updated_at = now() WHERE {key_column} = %s",
                 (value, key),
@@ -2813,9 +2840,39 @@ def set_costing_standard(payload: dict) -> dict:
                 """
                 INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value)
                 VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (actor, item_type, key, field, str(existing["old_value"]), f"{value:.2f}"),
             )
+            audit_id = cur.fetchone()["id"]
+
+            # Standards revaluation: on-hand finished stock moves to the new
+            # standard through account 5260, so the stock tie-outs keep holding.
+            if cards_before:
+                costing_after = load_costing(cur)
+                cur.execute(
+                    "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+                )
+                stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+                for sku, account in (("CASE-FG-500", SUBASSY_ACCOUNT), ("DRN-FG-600", FG_ACCOUNT)):
+                    on_hand = stock.get(sku, 0)
+                    if not on_hand:
+                        continue
+                    new_std = cost_card(cur, costing_after, sku)["unit_std"]
+                    delta = round(on_hand * (new_std - cards_before[sku]), 2)
+                    if not delta:
+                        continue
+                    lines = (
+                        [(account, delta, 0), ("5260", 0, delta)]
+                        if delta > 0
+                        else [("5260", -delta, 0), (account, 0, -delta)]
+                    )
+                    post_cost_entry(
+                        cur, f"REVAL-{audit_id}-{sku}", None, None, "revaluation",
+                        f"Revalue {on_hand:g} x {sku} on hand to new standard {new_std:.2f} "
+                        f"({key} {field} {existing['old_value']} -> {value:.2f} by {actor})",
+                        lines,
+                    )
         conn.commit()
     return {"itemType": item_type, "key": key, "field": field, "value": value, "actor": actor}
 
