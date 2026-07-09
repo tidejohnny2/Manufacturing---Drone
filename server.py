@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import math
 import os
@@ -2877,6 +2878,307 @@ def set_costing_standard(payload: dict) -> dict:
     return {"itemType": item_type, "key": key, "field": field, "value": value, "actor": actor}
 
 
+# ===== Internal audit =====
+# Regularly generated audit package: every schedule from the costing working
+# papers expressed as machine-checkable assertions, fingerprinted by hash,
+# cross-checked and certified by the LLM (or deterministically offline), with
+# certifications stored immutably.
+
+AUDIT_SYSTEM = (
+    "You are the internal auditor for a drone manufacturing plant's standard "
+    "absorption costing system (RM at actual with PPV at issue; WIP and finished "
+    "stock at standard; per-role labor rates; overhead at 25% of direct labor; "
+    "immutable double-entry cost ledger). You receive the complete audit evidence "
+    "package as JSON. Independently CROSS-CHECK it before certifying: (1) recompute "
+    "the trial balance footing from the account totals; (2) verify every journal "
+    "entry's debits equal its credits from the entry list; (3) rebuild both standard "
+    "cost cards from the standards inputs (material qty x standard cost, labor "
+    "minutes x rate / 60, overhead pct of direct labor, the case card rolling into "
+    "the drone card) and agree them to the system cards; (4) verify each completed "
+    "order's variance identity (ppv + usage + labor_rate + labor_efficiency + oh = "
+    "total) and that drone unit PPV is consistent across order sizes; (5) evaluate "
+    "the control results, the assertions list, the standards change log, and the "
+    "non-routine entries (opening, revaluations, adjustments) for propriety and "
+    "internal contradictions. Then respond with ONLY a JSON object, no markdown "
+    "fences: {\"opinion\": \"UNQUALIFIED\"|\"QUALIFIED\"|\"ADVERSE\", \"basis\": "
+    "\"2-4 sentences\", \"findings\": [{\"severity\": \"low\"|\"medium\"|\"high\", "
+    "\"area\": \"...\", \"detail\": \"...\"}], \"checks_performed\": [\"...\"]}. "
+    "Issue UNQUALIFIED only if all recomputations agree and there are no material "
+    "inconsistencies; QUALIFIED for immaterial or clearly scoped exceptions; "
+    "ADVERSE for material misstatement or failed controls."
+)
+
+
+def audit_assert(assertions: list, check_id: str, description: str, expected, actual, tolerance=0.0) -> bool:
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        ok = abs(round(float(actual) - float(expected), 2)) <= tolerance
+    else:
+        ok = expected == actual
+    assertions.append(
+        {"id": check_id, "check": description, "expected": expected, "actual": actual, "pass": bool(ok)}
+    )
+    return bool(ok)
+
+
+def build_audit_package() -> dict:
+    """The full audit evidence package, self-describing and machine-checkable."""
+    tb = fetch_trial_balance()  # also drives the simulation sync
+    cards = fetch_cost_cards()["cards"]
+    variances = fetch_variance_report()
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if not costing_ready(cur):
+                raise ValueError("Costing tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT e.event_ref, e.event_type, e.order_no, e.posted_at,
+                       COALESCE(SUM(l.debit), 0) AS debits, COALESCE(SUM(l.credit), 0) AS credits
+                FROM cost_entries e
+                LEFT JOIN cost_lines l ON l.entry_id = e.id
+                GROUP BY e.id, e.event_ref, e.event_type, e.order_no, e.posted_at
+                ORDER BY e.id
+                """
+            )
+            entries = cur.fetchall()
+            cur.execute("SELECT part_number, standard_cost, actual_cost FROM standard_costs ORDER BY part_number")
+            material_standards = cur.fetchall()
+            cur.execute("SELECT role, standard_rate, actual_rate FROM labor_rates ORDER BY role")
+            rate_standards = cur.fetchall()
+            cur.execute(
+                """
+                SELECT changed_at, actor, item_type, item_key, field, old_value, new_value
+                FROM standards_audit ORDER BY id
+                """
+            )
+            standards_audit = cur.fetchall()
+            cur.execute(
+                """
+                SELECT e.event_ref, e.event_type, e.memo, l.account_no, l.debit, l.credit
+                FROM cost_entries e
+                JOIN cost_lines l ON l.entry_id = e.id
+                WHERE e.event_type IN ('opening', 'revaluation', 'adjustment')
+                ORDER BY e.id, l.id
+                """
+            )
+            non_routine = cur.fetchall()
+            cur.execute(
+                """
+                SELECT part_number, SUM(quantity_on_hand) AS on_hand
+                FROM inventory_items
+                WHERE part_number IN ('CASE-FG-500', 'DRN-FG-600')
+                GROUP BY part_number
+                """
+            )
+            finished_stock = cur.fetchall()
+
+    assertions: list[dict] = []
+    audit_assert(
+        assertions, "A-TB-01", "Trial balance foots (total debits equal total credits)",
+        tb["total_debit"], tb["total_credit"], 0.01,
+    )
+    unbalanced = [e["event_ref"] for e in entries if abs(round(float(e["debits"]) - float(e["credits"]), 2)) > 0.01]
+    audit_assert(assertions, "A-JE-01", "Every journal entry balances (unbalanced count)", 0, len(unbalanced))
+    refs = [e["event_ref"] for e in entries]
+    audit_assert(assertions, "A-JE-02", "Journal entry references are unique", len(refs), len(set(refs)))
+    for i, control in enumerate(tb["controls"], start=1):
+        audit_assert(assertions, f"A-CT-{i:02d}", f"Control: {control['name']} ({control['detail']})", True, control["ok"])
+    for card in cards:
+        audit_assert(
+            assertions, f"A-CC-{card['sku']}",
+            f"Cost card internally consistent for {card['sku']} (DM + DL + OH = unit standard)",
+            card["unit_std"], round(card["dm_std"] + card["dl_std"] + card["oh_std"], 2), 0.01,
+        )
+    identity_breaks = [
+        oc["order_no"]
+        for oc in variances["orders"]
+        if abs(
+            round(
+                float(oc["ppv"]) + float(oc["usage_variance"]) + float(oc["labor_rate_variance"])
+                + float(oc["labor_efficiency_variance"]) + float(oc["oh_variance"])
+                - float(oc["total_variance"]),
+                2,
+            )
+        ) > 0.01
+    ]
+    audit_assert(assertions, "A-VR-01", "Variance identity holds for every completed order (breaks)", 0, len(identity_breaks))
+    drone_unit_ppv = sorted(
+        {round(float(oc["ppv"]) / oc["quantity"], 2) for oc in variances["orders"] if oc["sku"] == "DRN-FG-600"}
+    )
+    if len(drone_unit_ppv) > 1:
+        audit_assert(assertions, "A-VR-02", "Drone unit PPV constant across order sizes (spread)",
+                     0, round(drone_unit_ppv[-1] - drone_unit_ppv[0], 2), 0.01)
+    elif drone_unit_ppv:
+        audit_assert(assertions, "A-VR-02", "Drone unit PPV constant across order sizes", True, True)
+
+    package = {
+        "meta": {
+            "entity": "Drone Manufacturing Demo Plant (drones.onadapt.com)",
+            "report": "Internal audit package - standard costing cycle",
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "basis": (
+                "Standard absorption costing. RM at actual (PPV at issue); WIP and finished stock "
+                "at standard; per-role labor rates; OH applied at 25% of DL. All amounts USD. "
+                "Positive variances are unfavorable. RM has no physical tie-out by design "
+                "(buy-part bins are not decremented in this demo)."
+            ),
+        },
+        "trial_balance": {
+            "accounts": tb["accounts"],
+            "total_debit": tb["total_debit"],
+            "total_credit": tb["total_credit"],
+        },
+        "controls": tb["controls"],
+        "journal_entries": entries,
+        "cost_cards": cards,
+        "order_costs": variances["orders"],
+        "variance_totals": variances["totals"],
+        "standards": {
+            "materials": material_standards,
+            "labor_rates": rate_standards,
+            "overhead_pct_of_dl": 25.0,
+        },
+        "standards_audit": standards_audit,
+        "non_routine_entries": non_routine,
+        "finished_stock": finished_stock,
+        "assertions": assertions,
+        "assertion_summary": {
+            "total": len(assertions),
+            "passed": sum(1 for a in assertions if a["pass"]),
+        },
+    }
+    canonical = json.dumps(package, sort_keys=True, default=str)
+    package["package_hash"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return package
+
+
+def parse_certification_json(text: str) -> dict | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        cleaned = cleaned[4:] if cleaned.startswith("json") else cleaned
+    try:
+        parsed = json.loads(cleaned.strip())
+    except (json.JSONDecodeError, IndexError):
+        return None
+    if parsed.get("opinion") not in ("UNQUALIFIED", "QUALIFIED", "ADVERSE"):
+        return None
+    parsed.setdefault("basis", "")
+    parsed.setdefault("findings", [])
+    parsed.setdefault("checks_performed", [])
+    return parsed
+
+
+def offline_certification(package: dict) -> dict:
+    failed = [a for a in package["assertions"] if not a["pass"]]
+    material = [a for a in failed if a["id"].startswith(("A-TB", "A-JE"))]
+    opinion = "ADVERSE" if material else ("QUALIFIED" if failed else "UNQUALIFIED")
+    basis = (
+        f"Deterministic self-certification (no LLM available): "
+        f"{package['assertion_summary']['passed']} of {package['assertion_summary']['total']} "
+        f"assertions passed."
+        + (f" Failed: {', '.join(a['id'] for a in failed)}." if failed else " No exceptions noted.")
+    )
+    findings = [
+        {"severity": "high" if a in material else "medium", "area": a["id"], "detail": a["check"]}
+        for a in failed
+    ]
+    return {"opinion": opinion, "basis": basis, "findings": findings, "checks_performed": ["system assertions"]}
+
+
+def run_audit_certification(payload: dict) -> dict:
+    """Build the audit package, have the LLM cross-check and certify it (offline
+    fallback), and store the certification immutably."""
+    actor = str(payload.get("actor", "")).strip() or "manual"
+    package = build_audit_package()
+
+    certification = None
+    mode = "offline"
+    model = None
+    if ask_ai_available():
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=4096,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "low"},
+                system=AUDIT_SYSTEM,
+                messages=[{"role": "user", "content": json.dumps(package, default=str)}],
+            )
+            text = next((block.text for block in response.content if block.type == "text"), "")
+            certification = parse_certification_json(text)
+            if certification:
+                mode = "claude"
+                model = ANTHROPIC_MODEL
+        except Exception:
+            certification = None
+    if certification is None:
+        certification = offline_certification(package)
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO audit_certifications (
+                  package_hash, as_of, actor, mode, model, opinion, basis, findings,
+                  assertions_total, assertions_passed
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, certified_at
+                """,
+                (
+                    package["package_hash"], package["meta"]["as_of"], actor, mode, model,
+                    certification["opinion"], certification["basis"],
+                    json.dumps(certification["findings"]),
+                    package["assertion_summary"]["total"], package["assertion_summary"]["passed"],
+                ),
+            )
+            stored = cur.fetchone()
+        conn.commit()
+
+    return {
+        "certification_id": stored["id"],
+        "certified_at": str(stored["certified_at"]),
+        "package_hash": package["package_hash"],
+        "as_of": package["meta"]["as_of"],
+        "actor": actor,
+        "mode": mode,
+        "model": model,
+        "opinion": certification["opinion"],
+        "basis": certification["basis"],
+        "findings": certification["findings"],
+        "checks_performed": certification.get("checks_performed", []),
+        "assertion_summary": package["assertion_summary"],
+    }
+
+
+def fetch_audit_certifications() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('audit_certifications') AS reg")
+            if cur.fetchone()["reg"] is None:
+                raise ValueError("Audit tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT id, package_hash, as_of, actor, mode, model, opinion, basis,
+                       findings, assertions_total, assertions_passed, certified_at
+                FROM audit_certifications
+                ORDER BY id DESC
+                LIMIT 20
+                """
+            )
+            certifications = cur.fetchall()
+            for row in certifications:
+                try:
+                    row["findings"] = json.loads(row["findings"])
+                except (TypeError, json.JSONDecodeError):
+                    row["findings"] = []
+    return {"certifications": certifications}
+
+
 def fetch_plant_settings() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -3236,6 +3538,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/costing/ledger",
             "/api/costing/trial-balance",
             "/api/costing/standards",
+            "/api/audit/package",
+            "/api/audit/certifications",
         ):
             try:
                 if path == "/api/costing/cost-cards":
@@ -3250,6 +3554,10 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     payload = fetch_cost_ledger(order_no, limit)
                 elif path == "/api/costing/trial-balance":
                     payload = fetch_trial_balance()
+                elif path == "/api/audit/package":
+                    payload = build_audit_package()
+                elif path == "/api/audit/certifications":
+                    payload = fetch_audit_certifications()
                 else:
                     payload = fetch_costing_standards()
                 json_response(self, HTTPStatus.OK, payload)
@@ -3293,6 +3601,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/plant-settings",
             "/api/station-signoff",
             "/api/costing/standards",
+            "/api/audit/certify",
             "/api/schedule/preview",
             "/api/schedule/max-output",
         ):
@@ -3325,6 +3634,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/costing/standards":
                 json_response(self, HTTPStatus.OK, set_costing_standard(payload))
+                return
+            if path == "/api/audit/certify":
+                json_response(self, HTTPStatus.OK, run_audit_certification(payload))
                 return
             if path == "/api/ask-ai":
                 json_response(self, HTTPStatus.OK, ask_ai(payload))

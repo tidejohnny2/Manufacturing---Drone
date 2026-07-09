@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Internal Audit</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="bom-shell">
+      <header class="bom-header no-print">
+        <div>
+          <p class="eyebrow">Plant accounting</p>
+          <h1>Internal Audit</h1>
+          <p class="bom-intro">
+            Regularly generated audit of the costing cycle: the full evidence package is expressed as
+            machine-checkable assertions, fingerprinted by hash, independently cross-checked and certified
+            by the LLM auditor (deterministic self-certification when offline), and stored immutably.
+            A scheduled run certifies the books daily; this page prints as the audit report.
+          </p>
+        </div>
+        <div class="bom-actions">
+          <a class="nav-link" href="costing.html">Costing</a>
+          <a class="nav-link" href="overview.html">Overview</a>
+          <a class="nav-link" href="schedule.html">Schedule</a>
+          <a class="nav-link" href="production-orders.html">Orders</a>
+          <button id="runAudit" type="button" class="nav-link run-audit">Run Internal Audit</button>
+          <button type="button" class="nav-link" onclick="window.print()">Print Report</button>
+          <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
+        </div>
+      </header>
+
+      <section class="plan-band" aria-label="Certification opinion">
+        <div class="print-header">
+          <h2 id="opinionTitle">Latest Certification</h2>
+          <p id="opinionMeta" class="kit-note">Run the internal audit to produce a certification.</p>
+        </div>
+        <div id="opinionBanner" class="opinion-banner" hidden></div>
+        <p id="opinionBasis" class="opinion-basis"></p>
+        <div id="findingsWrap" hidden>
+          <h3 class="labor-line-title">Findings</h3>
+          <div class="bom-table-wrap">
+            <table class="bom-table">
+              <thead><tr><th>Severity</th><th>Area</th><th>Detail</th></tr></thead>
+              <tbody id="findingsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="plan-band" aria-label="Assertions">
+        <h2>Evidence Assertions <span id="assertionSummary" class="kit-verdict"></span></h2>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead><tr><th>ID</th><th>Check</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
+            <tbody id="assertionBody">
+              <tr><td colspan="5">Loading audit package…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="kit-note" id="packageMeta"></p>
+      </section>
+
+      <section class="plan-band" aria-label="Certification history">
+        <h2>Certification History (Immutable)</h2>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>#</th><th>Certified (UTC)</th><th>Actor</th><th>Mode</th>
+                <th>Opinion</th><th>Assertions</th><th>Package Hash</th><th>Basis</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr><td colspan="8">No certifications yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="theme.js"></script>
+    <script src="audit.js"></script>
+  </body>
+</html>

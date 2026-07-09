@@ -1,0 +1,10 @@
+[Unit]
+Description=Drone plant internal audit certification (scheduled)
+After=drones.service
+Requires=drones.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -sS -X POST http://127.0.0.1:8796/api/audit/certify \
+  -H "Content-Type: application/json" \
+  -d '{"actor": "scheduled internal audit"}'

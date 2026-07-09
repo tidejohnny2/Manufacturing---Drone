@@ -2016,3 +2016,69 @@ body.view-rework .shipping-route {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Internal audit page --- */
+
+.opinion-banner {
+  padding: 14px 18px;
+  font-size: 1.1rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  border: 2px solid;
+  margin: 10px 0;
+}
+
+.opinion-unqualified {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #047857;
+}
+
+.opinion-qualified {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #b45309;
+}
+
+.opinion-adverse {
+  background: #fef2f2;
+  color: #dc2626;
+  border-color: #dc2626;
+}
+
+.opinion-basis {
+  font-size: 0.86rem;
+  font-weight: 600;
+  margin: 8px 0 0;
+}
+
+.run-audit {
+  background: var(--oa-accent) !important;
+  color: var(--oa-accent-fg) !important;
+  border: 0 !important;
+}
+
+.hash-cell {
+  font-family: Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+@media print {
+  .no-print,
+  .bom-actions,
+  #runAudit {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  .plan-band {
+    break-inside: avoid;
+    border: 0;
+    box-shadow: none;
+  }
+  .bom-table th {
+    background: #eee !important;
+    color: #000 !important;
+  }
+}
