@@ -27,6 +27,7 @@
           <a class="nav-link" href="production-orders.html">Orders</a>
           <a class="nav-link" href="production-plan.html">Plan</a>
           <a class="nav-link" href="sales.html">Sales</a>
+          <a class="nav-link" href="accounting.html">Accounting</a>
           <a class="nav-link" href="audit.html">Audit</a>
           <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
         </div>
@@ -48,10 +49,6 @@
         <div>
           <span>Total variance to date</span>
           <strong id="sumVariance">—</strong>
-        </div>
-        <div>
-          <span>Controls</span>
-          <strong id="sumControls">—</strong>
         </div>
       </section>
 
@@ -113,39 +110,6 @@
         </div>
       </section>
 
-      <section class="plan-band" aria-label="Trial balance and controls">
-        <h2>Trial Balance &amp; Controls</h2>
-        <div class="tb-grid">
-          <div class="bom-table-wrap">
-            <table class="bom-table">
-              <thead>
-                <tr><th>Acct</th><th>Account</th><th>Debits</th><th>Credits</th><th>Balance</th></tr>
-              </thead>
-              <tbody id="tbBody"></tbody>
-            </table>
-          </div>
-          <div>
-            <ul class="control-list" id="controlList"></ul>
-            <p class="kit-note" id="tbNote"></p>
-          </div>
-        </div>
-      </section>
-
-      <section class="plan-band" aria-label="Cost journal">
-        <div class="kit-head">
-          <h2>Cost Journal (Audit Trail)</h2>
-          <input id="journalFilter" type="text" placeholder="Filter by order no…" class="journal-filter" />
-        </div>
-        <div class="bom-table-wrap">
-          <table class="bom-table journal-table">
-            <thead>
-              <tr><th>Posted</th><th>Ref</th><th>Type</th><th>Order</th><th>Account</th><th>Debit</th><th>Credit</th></tr>
-            </thead>
-            <tbody id="journalBody"></tbody>
-          </table>
-        </div>
-      </section>
-
       <section class="plan-band" aria-label="Standards and rates">
         <div class="kit-head">
           <h2>Standards &amp; Rates</h2>
@@ -190,55 +154,6 @@
         </div>
       </section>
 
-      <section class="plan-band" aria-label="Chart of accounts maintenance">
-        <div class="kit-head">
-          <h2>Chart of Accounts (Maintenance)</h2>
-          <span id="accountsMsg" class="kit-verdict"></span>
-        </div>
-        <p class="kit-note">
-          Names are always editable. Type and normal side lock once an account has postings; accounts the
-          posting engine uses are protected and cannot be deleted. Every change lands in the audit trail
-          above under type "gl_account".
-        </p>
-        <form id="accountCreate" class="order-form schedule-form">
-          <label>
-            <span>Account No.</span>
-            <input id="newAccountNo" type="text" maxlength="10" placeholder="e.g. 5100" />
-          </label>
-          <label>
-            <span>Name</span>
-            <input id="newAccountName" type="text" maxlength="80" placeholder="e.g. Cost of Goods Sold" />
-          </label>
-          <label>
-            <span>Type</span>
-            <select id="newAccountType"></select>
-          </label>
-          <label>
-            <span>Normal Side</span>
-            <select id="newAccountSide">
-              <option value="debit">debit</option>
-              <option value="credit">credit</option>
-            </select>
-          </label>
-          <button type="submit">Add Account</button>
-        </form>
-        <div class="bom-table-wrap">
-          <table class="bom-table">
-            <thead>
-              <tr>
-                <th>Acct</th>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Normal Side</th>
-                <th>Postings</th>
-                <th>Balance</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="accountsBody"></tbody>
-          </table>
-        </div>
-      </section>
     </main>
     <script src="theme.js"></script>
     <script src="ask-ai.js"></script>
