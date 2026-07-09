@@ -26,7 +26,8 @@ INSERT INTO gl_accounts (account_no, name, account_type, normal_side) VALUES
   ('5220', 'Material Usage Variance', 'variance', 'debit'),
   ('5230', 'Labor Rate Variance', 'variance', 'debit'),
   ('5240', 'Labor Efficiency Variance', 'variance', 'debit'),
-  ('5250', 'Overhead Absorption Variance', 'variance', 'debit')
+  ('5250', 'Overhead Absorption Variance', 'variance', 'debit'),
+  ('5260', 'Standards Revaluation', 'variance', 'debit')
 ON CONFLICT (account_no) DO NOTHING;
 
 -- Material standards: standard cost drives WIP/FG valuation; the simulated
