@@ -2883,9 +2883,13 @@ def set_costing_standard(payload: dict) -> dict:
 
 # Accounts the posting engine writes to by name; they can be renamed but not
 # deleted or restructured from the maintenance form.
+AR_ACCOUNT = "1200"
+SALES_ACCOUNT = "4000"
+COGS_ACCOUNT = "5010"
 PROTECTED_GL_ACCOUNTS = {
     RM_ACCOUNT, SUBASSY_ACCOUNT, WIP_ACCOUNT, FG_ACCOUNT,
     PAYROLL_ACCOUNT, OH_ACCOUNT, OPENING_ACCOUNT,
+    AR_ACCOUNT, SALES_ACCOUNT, COGS_ACCOUNT,
     "5210", "5220", "5230", "5240", "5250", "5260",
 }
 GL_ACCOUNT_TYPES = ("asset", "liability", "equity", "income", "expense", "variance")
@@ -3018,6 +3022,300 @@ def manage_gl_account(payload: dict) -> dict:
 
         conn.commit()
     return {"action": action, "accountNo": account_no, "actor": actor}
+
+
+# ===== Sales: customers, sales orders, ship & invoice =====
+# Order-to-cash on the same books: shipping relieves finished stock at the
+# CURRENT standard (so the stock tie-out controls keep holding) and the
+# invoice posts AR/Sales and COGS through the same immutable cost ledger.
+
+FG_STOCK_ZONES = {"DRN-FG-600": "inventory", "CASE-FG-500": "case_inventory"}
+
+
+def _next_sales_number(cur, table: str, column: str, prefix: str) -> str:
+    cur.execute(
+        f"""
+        SELECT COALESCE(MAX(substring({column} FROM {len(prefix) + 1})::int), 1000) + 1 AS next
+        FROM {table}
+        WHERE {column} ~ %s
+        """,
+        (f"^{prefix}[0-9]+$",),
+    )
+    return f"{prefix}{cur.fetchone()['next']}"
+
+
+def fetch_sales() -> dict:
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('sales_orders') AS reg")
+            if cur.fetchone()["reg"] is None:
+                raise ValueError("Sales tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT c.id, c.name, c.contact, c.terms,
+                       COUNT(so.id) AS order_count
+                FROM customers c
+                LEFT JOIN sales_orders so ON so.customer_id = c.id
+                GROUP BY c.id, c.name, c.contact, c.terms
+                ORDER BY c.name
+                """
+            )
+            customers = cur.fetchall()
+            cur.execute("SELECT sku, list_price FROM price_list ORDER BY sku")
+            price_list = cur.fetchall()
+            cur.execute(
+                """
+                SELECT part_number, SUM(quantity_on_hand) AS on_hand
+                FROM inventory_items
+                WHERE part_number IN ('DRN-FG-600', 'CASE-FG-500')
+                GROUP BY part_number
+                """
+            )
+            stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT so.id, so.so_no, so.status, so.requested_date, so.created_at,
+                       c.name AS customer
+                FROM sales_orders so
+                JOIN customers c ON c.id = so.customer_id
+                ORDER BY so.id DESC
+                LIMIT 40
+                """
+            )
+            orders = cur.fetchall()
+            order_ids = [o["id"] for o in orders]
+            lines_by_order: dict[int, list] = {}
+            if order_ids:
+                cur.execute(
+                    """
+                    SELECT sales_order_id, sku, quantity, unit_price
+                    FROM sales_order_lines
+                    WHERE sales_order_id = ANY(%s)
+                    ORDER BY id
+                    """,
+                    (order_ids,),
+                )
+                for line in cur.fetchall():
+                    lines_by_order.setdefault(line["sales_order_id"], []).append(line)
+            for order in orders:
+                lines = lines_by_order.get(order["id"], [])
+                order["lines"] = lines
+                order["subtotal"] = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
+                if order["status"] == "open":
+                    required: dict[str, int] = {}
+                    for line in lines:
+                        required[line["sku"]] = required.get(line["sku"], 0) + line["quantity"]
+                    order["can_fulfill"] = all(stock.get(sku, 0) >= qty for sku, qty in required.items())
+                else:
+                    order["can_fulfill"] = None
+            cur.execute(
+                """
+                SELECT i.invoice_no, so.so_no, c.name AS customer, i.subtotal, i.cogs,
+                       i.invoiced_at
+                FROM invoices i
+                JOIN sales_orders so ON so.id = i.sales_order_id
+                JOIN customers c ON c.id = i.customer_id
+                ORDER BY i.id DESC
+                LIMIT 40
+                """
+            )
+            invoices = cur.fetchall()
+            for invoice in invoices:
+                invoice["margin"] = round(float(invoice["subtotal"]) - float(invoice["cogs"]), 2)
+    return {"customers": customers, "price_list": price_list, "stock": stock,
+            "orders": orders, "invoices": invoices}
+
+
+def manage_customer(payload: dict) -> dict:
+    action = str(payload.get("action", "")).strip()
+    if action not in ("create", "update", "delete"):
+        raise ValueError("action must be create, update, or delete.")
+    customer_id = payload.get("customerId")
+    name = str(payload.get("name", "")).strip()
+    if action in ("create", "update") and (not name or len(name) > 120):
+        raise ValueError("Customer name is required (max 120 chars).")
+    contact = str(payload.get("contact", "")).strip()
+    terms = str(payload.get("terms", "")).strip() or "Net 30"
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if action == "create":
+                cur.execute(
+                    "INSERT INTO customers (name, contact, terms) VALUES (%s, %s, %s) RETURNING id",
+                    (name, contact, terms),
+                )
+                customer_id = cur.fetchone()["id"]
+            elif action == "update":
+                cur.execute(
+                    "UPDATE customers SET name = %s, contact = %s, terms = %s WHERE id = %s",
+                    (name, contact, terms, customer_id),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Unknown customer.")
+            else:
+                cur.execute("SELECT COUNT(*) AS n FROM sales_orders WHERE customer_id = %s", (customer_id,))
+                if cur.fetchone()["n"]:
+                    raise ValueError("Customers with sales orders cannot be deleted.")
+                cur.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
+                if cur.rowcount == 0:
+                    raise ValueError("Unknown customer.")
+        conn.commit()
+    return {"action": action, "customerId": customer_id, "name": name}
+
+
+def create_sales_order(payload: dict) -> dict:
+    customer_id = payload.get("customerId")
+    requested_date = str(payload.get("requestedDate", "")).strip() or None
+    lines = payload.get("lines") or []
+    if not lines:
+        raise ValueError("A sales order needs at least one line.")
+    parsed = []
+    for line in lines:
+        sku = str(line.get("sku", "")).strip()
+        if sku not in FG_STOCK_ZONES:
+            raise ValueError(f"Unknown finished good {sku}.")
+        quantity = int(line.get("quantity", 0))
+        if quantity <= 0:
+            raise ValueError("Line quantity must be greater than zero.")
+        parsed.append({"sku": sku, "quantity": quantity, "unit_price": line.get("unitPrice")})
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM customers WHERE id = %s", (customer_id,))
+            if not cur.fetchone():
+                raise ValueError("Unknown customer.")
+            cur.execute("SELECT sku, list_price FROM price_list")
+            list_prices = {row["sku"]: float(row["list_price"]) for row in cur.fetchall()}
+            so_no = _next_sales_number(cur, "sales_orders", "so_no", "SO-")
+            cur.execute(
+                "INSERT INTO sales_orders (so_no, customer_id, requested_date) VALUES (%s, %s, %s) RETURNING id",
+                (so_no, customer_id, requested_date),
+            )
+            so_id = cur.fetchone()["id"]
+            for line in parsed:
+                price = line["unit_price"]
+                price = list_prices.get(line["sku"], 0.0) if price is None else round(float(price), 2)
+                if price < 0:
+                    raise ValueError("Unit price cannot be negative.")
+                cur.execute(
+                    """
+                    INSERT INTO sales_order_lines (sales_order_id, sku, quantity, unit_price)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (so_id, line["sku"], line["quantity"], price),
+                )
+        conn.commit()
+    return {"soNo": so_no, "status": "open", "lines": len(parsed)}
+
+
+def ship_and_invoice(payload: dict) -> dict:
+    """Ship a full open sales order from finished stock and invoice it:
+    AR/Sales at price, COGS relieving stock at the current standard card."""
+    so_no = str(payload.get("soNo", "")).strip()
+    if not so_no:
+        raise ValueError("soNo is required.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            costing = load_costing(cur)
+            if costing is None:
+                raise ValueError("Costing tables are not installed yet.")
+            cur.execute(
+                """
+                SELECT so.id, so.status, so.customer_id, c.name AS customer
+                FROM sales_orders so JOIN customers c ON c.id = so.customer_id
+                WHERE so.so_no = %s
+                """,
+                (so_no,),
+            )
+            order = cur.fetchone()
+            if not order:
+                raise ValueError(f"Unknown sales order {so_no}.")
+            if order["status"] != "open":
+                raise ValueError(f"{so_no} is {order['status']}; only open orders can be invoiced.")
+            cur.execute(
+                "SELECT sku, quantity, unit_price FROM sales_order_lines WHERE sales_order_id = %s ORDER BY id",
+                (order["id"],),
+            )
+            lines = cur.fetchall()
+            if not lines:
+                raise ValueError(f"{so_no} has no lines.")
+
+            required: dict[str, int] = {}
+            for line in lines:
+                required[line["sku"]] = required.get(line["sku"], 0) + line["quantity"]
+            for sku, quantity in required.items():
+                cur.execute(
+                    "SELECT COALESCE(SUM(quantity_on_hand), 0) AS on_hand FROM inventory_items WHERE part_number = %s",
+                    (sku,),
+                )
+                on_hand = float(cur.fetchone()["on_hand"])
+                if on_hand < quantity:
+                    raise ValueError(
+                        f"Insufficient stock to ship {so_no}: {sku} needs {quantity}, "
+                        f"only {on_hand:g} on hand. Produce first (or ask Ask AI to create the order)."
+                    )
+
+            cards = {sku: cost_card(cur, costing, sku) for sku in required}
+            subtotal = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
+            cogs_by_sku = {sku: round(cards[sku]["unit_std"] * qty, 2) for sku, qty in required.items()}
+            cogs_total = round(sum(cogs_by_sku.values()), 2)
+
+            invoice_no = _next_sales_number(cur, "invoices", "invoice_no", "INV-")
+            cur.execute(
+                """
+                INSERT INTO invoices (invoice_no, sales_order_id, customer_id, subtotal, cogs)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+                """,
+                (invoice_no, order["id"], order["customer_id"], subtotal, cogs_total),
+            )
+            invoice_id = cur.fetchone()["id"]
+            cur.execute("UPDATE sales_orders SET status = 'invoiced' WHERE id = %s", (order["id"],))
+
+            for sku, quantity in required.items():
+                zone = FG_STOCK_ZONES[sku]
+                cur.execute(
+                    """
+                    UPDATE inventory_items
+                    SET quantity_on_hand = quantity_on_hand - %s, updated_at = now()
+                    WHERE location_zone_id = %s AND part_number = %s
+                    """,
+                    (quantity, zone, sku),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO inventory_transactions (
+                      transaction_type, from_zone_id, part_number, quantity, unit, reference
+                    )
+                    VALUES ('issue', %s, %s, %s, 'each', %s)
+                    """,
+                    (zone, sku, quantity, invoice_no),
+                )
+
+            post_cost_entry(
+                cur, f"INV{invoice_id}-REV", None, invoice_no, "revenue",
+                f"{invoice_no}: invoice {order['customer']} for {so_no}",
+                [(AR_ACCOUNT, subtotal, 0), (SALES_ACCOUNT, 0, subtotal)],
+            )
+            cogs_lines = [(COGS_ACCOUNT, cogs_total, 0)]
+            for sku, amount in cogs_by_sku.items():
+                stock_account = FG_ACCOUNT if sku == "DRN-FG-600" else SUBASSY_ACCOUNT
+                cogs_lines.append((stock_account, 0, amount))
+            post_cost_entry(
+                cur, f"INV{invoice_id}-COGS", None, invoice_no, "cogs",
+                f"{invoice_no}: relieve finished stock at current standard for {so_no}",
+                cogs_lines,
+            )
+        conn.commit()
+
+    return {
+        "invoiceNo": invoice_no,
+        "soNo": so_no,
+        "customer": order["customer"],
+        "subtotal": subtotal,
+        "cogs": cogs_total,
+        "margin": round(subtotal - cogs_total, 2),
+    }
 
 
 # ===== Internal audit =====
@@ -4112,6 +4410,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/costing/trial-balance",
             "/api/costing/standards",
             "/api/costing/accounts",
+            "/api/sales",
             "/api/audit/package",
             "/api/audit/certifications",
         ):
@@ -4130,6 +4429,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     payload = fetch_trial_balance()
                 elif path == "/api/costing/accounts":
                     payload = fetch_gl_accounts()
+                elif path == "/api/sales":
+                    payload = fetch_sales()
                 elif path == "/api/audit/package":
                     payload = build_audit_package()
                 elif path == "/api/audit/certifications":
@@ -4179,6 +4480,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/station-signoff",
             "/api/costing/standards",
             "/api/costing/accounts",
+            "/api/sales/customer",
+            "/api/sales/order",
+            "/api/sales/invoice",
             "/api/audit/certify",
             "/api/schedule/preview",
             "/api/schedule/max-output",
@@ -4215,6 +4519,15 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/costing/accounts":
                 json_response(self, HTTPStatus.OK, manage_gl_account(payload))
+                return
+            if path == "/api/sales/customer":
+                json_response(self, HTTPStatus.OK, manage_customer(payload))
+                return
+            if path == "/api/sales/order":
+                json_response(self, HTTPStatus.OK, create_sales_order(payload))
+                return
+            if path == "/api/sales/invoice":
+                json_response(self, HTTPStatus.OK, ship_and_invoice(payload))
                 return
             if path == "/api/audit/certify":
                 json_response(self, HTTPStatus.OK, run_audit_certification(payload))
