@@ -1594,3 +1594,51 @@ body.view-rework .shipping-route {
   background: #fef3c7;
   font-weight: 800;
 }
+
+/* Station drill-down */
+.station-link {
+  margin-top: 14px;
+  width: 100%;
+}
+
+.gantt-station-link {
+  color: var(--oa-accent-ink);
+  text-decoration: none;
+}
+
+.gantt-station-link:hover {
+  text-decoration: underline;
+}
+
+.bottleneck-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 10px;
+  padding: 3px 10px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+}
+
+.station-running-row td {
+  background: var(--oa-accent-tint);
+  font-weight: 700;
+}
+
+.station-bom-wrap {
+  margin-top: 12px;
+  box-shadow: none;
+}
+
+.station-bom-wrap .bom-table {
+  min-width: 900px;
+}
+
+.bom-summary .capacity-edit input {
+  font-size: 1rem;
+  font-weight: 800;
+}

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Station Detail</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="bom-shell">
+      <header class="bom-header">
+        <div>
+          <p class="eyebrow" id="stationLine">Workstation drill-down</p>
+          <h1 id="stationName">Station</h1>
+          <p class="bom-intro" id="stationDescription"></p>
+        </div>
+        <div class="bom-actions">
+          <a class="nav-link" href="overview.html">Overview</a>
+          <a class="nav-link" href="index.html">Drone Floor</a>
+          <a class="nav-link" href="case-floor.html">Case Floor</a>
+          <a class="nav-link" href="schedule.html">Schedule</a>
+          <a class="nav-link" href="production-orders.html">Orders</a>
+          <a class="nav-link" href="inventory.html">Inventory</a>
+          <button type="button" class="nav-link" onclick="oaOpenSettings()" title="Settings" aria-label="Settings">&#9881;</button>
+        </div>
+      </header>
+
+      <section class="bom-summary production-summary" aria-label="Station vitals">
+        <div>
+          <span>Capacity (units at a time)</span>
+          <strong>
+            <span class="capacity-edit">
+              <input id="capacityInput" type="number" min="1" placeholder="&#8734;" aria-label="Units at a time" />
+              <button id="capacitySave" type="button">Save</button>
+            </span>
+          </strong>
+          <span id="capacityMsg" class="capacity-msg"></span>
+        </div>
+        <div>
+          <span>Cycle minutes (recorded)</span>
+          <strong id="cycleMinutes">—</strong>
+        </div>
+        <div>
+          <span>Max output</span>
+          <strong id="maxOutput">—</strong>
+        </div>
+        <div>
+          <span>Frees up</span>
+          <strong id="freesAt">—</strong>
+        </div>
+      </section>
+
+      <section class="bom-summary production-summary" aria-label="Utilization and throughput">
+        <div>
+          <span>Busy (scheduled), last 60 min</span>
+          <strong id="busyPct">—</strong>
+        </div>
+        <div>
+          <span>Units in, last 24 h</span>
+          <strong id="unitsIn">—</strong>
+        </div>
+        <div>
+          <span>Units out, last 24 h</span>
+          <strong id="unitsOut">—</strong>
+        </div>
+        <div>
+          <span>24 h rate vs ceiling</span>
+          <strong id="ceilingPct">—</strong>
+        </div>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Coming up at this station">
+        <table class="bom-table orders-table">
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>Order</th>
+              <th>Item</th>
+              <th>Qty</th>
+              <th>Arrives</th>
+              <th>Leaves</th>
+            </tr>
+          </thead>
+          <tbody id="scheduleBody">
+            <tr><td colspan="6">Nothing scheduled at this station.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Parts stocked at this station">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Item</th>
+              <th>Part Number</th>
+              <th>On Hand</th>
+              <th>Allocated</th>
+              <th>Available</th>
+              <th>Min</th>
+              <th>Max</th>
+              <th>Status</th>
+              <th>Control Note</th>
+            </tr>
+          </thead>
+          <tbody id="partsBody">
+            <tr><td colspan="10">No inventory is stocked at this station.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="plan-band" aria-label="Work content and instructions">
+        <h2>Work Content &amp; Instructions</h2>
+        <div class="plan-cards" id="planCards"></div>
+        <div class="bom-table-wrap station-bom-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Part Number</th>
+                <th>Description</th>
+                <th>Category</th>
+                <th>Qty / unit</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody id="bomBody">
+              <tr><td colspan="6">No BOM lines are installed at this station.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Recent station activity">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Qty In</th>
+              <th>Qty Out</th>
+              <th>Event</th>
+              <th>Reference</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody id="ledgerBody">
+            <tr><td colspan="7">No activity recorded yet.</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+    <script src="theme.js"></script>
+    <script src="station.js"></script>
+  </body>
+</html>

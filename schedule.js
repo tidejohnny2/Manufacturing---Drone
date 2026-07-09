@@ -99,8 +99,11 @@ function renderLine(line, now) {
           })()
         : "";
       const capacity = station.capacity ? ` (cap ${station.capacity})` : "";
+      const label = station.capacity != null || station.max_per_hour != null
+        ? `<a class="gantt-station-link" href="station.html?zone=${encodeURIComponent(station.zone_id)}" title="Open station details">${esc(station.station)}</a>`
+        : esc(station.station);
       return `
-        <div class="gantt-station">${esc(station.station)}${capacity}</div>
+        <div class="gantt-station">${label}${capacity}</div>
         <div class="gantt-track">${bars}${ghost}</div>`;
     })
     .join("");

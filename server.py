@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -1332,6 +1333,185 @@ def max_output_schedule(payload: dict) -> dict:
     }
 
 
+# Maps zone ids to the station names used in production-plan.csv so the
+# drill-down can show work scripts, quality gates, and tooling per station.
+PLAN_STATION_BY_ZONE = {
+    "receiving": "Receiving",
+    "raw": "Kitting",
+    "ws1": "Airframe",
+    "ws2": "Electronics",
+    "ws3": "Firmware",
+    "ws4": "Motor Test",
+    "ws5": "QA Test",
+    "fg": "Packaged",
+    "inventory": "FG Inventory",
+    "case_receiving": "Case Receiving",
+    "case_raw": "Case Staging",
+    "cws1": "Shell Forming",
+    "cws2": "Foam Fit",
+    "cws3": "Hardware",
+    "cws4": "Inspection",
+    "case_inventory": "Case Inventory",
+}
+
+
+def load_plan_row(zone_id: str) -> dict | None:
+    station_name = PLAN_STATION_BY_ZONE.get(zone_id)
+    if not station_name:
+        return None
+    plan_path = BASE_DIR / "production-plan.csv"
+    if not plan_path.exists():
+        return None
+    with open(plan_path, newline="", encoding="utf-8") as plan_file:
+        for row in csv.DictReader(plan_file):
+            if row.get("station") == station_name:
+                return row
+    return None
+
+
+def fetch_station(zone_id: str) -> dict:
+    """Everything about one workstation: schedule, utilization, parts, work, ledger."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT z.id, z.name, z.zone_type, z.description, z.area_sq_ft,
+                       z.primary_flow, z.status, z.capacity, z.facility_id,
+                       f.name AS facility_name
+                FROM zones z
+                JOIN facilities f ON f.id = z.facility_id
+                WHERE z.id = %s
+                """,
+                (zone_id,),
+            )
+            zone = cur.fetchone()
+            if not zone:
+                raise ValueError("Unknown zone.")
+
+            route_steps = fetch_route_steps(cur, zone["facility_id"])
+            cycle_minutes = None
+            max_per_hour = None
+            bottleneck = False
+            if route_steps:
+                zone_order, zone_names, _, standard_durations, capacities = build_zone_model(route_steps)
+                cycle_minutes = standard_durations.get(zone_id)
+                capacity = capacities.get(zone_id)
+                if capacity and cycle_minutes:
+                    max_per_hour = round(capacity * 60 / cycle_minutes, 1)
+                rates = [
+                    capacities[z] * 60 / standard_durations[z]
+                    for z in zone_order[:-1]
+                    if capacities.get(z) and standard_durations.get(z)
+                ]
+                if max_per_hour is not None and rates and max_per_hour == round(min(rates), 1):
+                    bottleneck = True
+
+            now = datetime.now(timezone.utc)
+            schedule = []
+            busy_seconds_last_hour = 0.0
+            window_start = now - timedelta(hours=1)
+            for state in simulate_active_states(cur, zone["facility_id"]):
+                if state["order"]["production_status"] == "complete":
+                    continue
+                segment = next(
+                    (item for item in state["schedule"] if item["zone_id"] == zone_id), None
+                )
+                if not segment:
+                    continue
+                overlap_start = max(segment["start"], window_start)
+                overlap_end = min(segment["end"], now)
+                if overlap_end > overlap_start:
+                    busy_seconds_last_hour += (overlap_end - overlap_start).total_seconds()
+                schedule.append(
+                    {
+                        "order_no": state["order"]["order_no"],
+                        "finished_good": state["order"]["finished_good"],
+                        "quantity": state["order"]["quantity"],
+                        "start": segment["start"].isoformat(),
+                        "end": segment["end"].isoformat(),
+                        "running": segment["start"] <= now < segment["end"],
+                        "done_here": segment["end"] <= now,
+                    }
+                )
+            schedule.sort(key=lambda item: item["start"])
+            idle_at = max((item["end"] for item in schedule), default=None)
+
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(quantity_in) FILTER (WHERE transaction_type = 'in'), 0) AS units_in,
+                       COALESCE(SUM(quantity_out) FILTER (WHERE transaction_type = 'out'), 0) AS units_out
+                FROM production_workstation_ledger
+                WHERE zone_id = %s AND transaction_at >= now() - interval '24 hours'
+                """,
+                (zone_id,),
+            )
+            ledger_sums = cur.fetchone()
+            units_out_24h = float(ledger_sums["units_out"])
+            pct_of_ceiling = (
+                round(units_out_24h / 24 / max_per_hour * 100, 1) if max_per_hour else None
+            )
+
+            cur.execute(
+                """
+                SELECT area, item_name, part_number, quantity_on_hand, quantity_allocated,
+                       quantity_available, min_quantity, max_quantity, status, control_note
+                FROM inventory_items
+                WHERE location_zone_id = %s
+                ORDER BY area, id
+                """,
+                (zone_id,),
+            )
+            parts = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT m.sku AS product, bi.part_number, bi.description, bi.category,
+                       bi.quantity, bi.unit, bi.supply_type
+                FROM bom_items bi
+                JOIN materials m ON m.id = bi.parent_material_id
+                WHERE bi.station_zone_id = %s
+                ORDER BY m.sku, bi.id
+                """,
+                (zone_id,),
+            )
+            bom_work = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT transaction_at, transaction_type, quantity_in, quantity_out,
+                       accounting_event, reference, notes
+                FROM production_workstation_ledger
+                WHERE zone_id = %s
+                ORDER BY transaction_at DESC, id DESC
+                LIMIT 12
+                """,
+                (zone_id,),
+            )
+            ledger = cur.fetchall()
+
+    return {
+        "now": now.isoformat(),
+        "zone": {
+            **zone,
+            "cycle_minutes": cycle_minutes,
+            "max_per_hour": max_per_hour,
+            "bottleneck": bottleneck,
+        },
+        "schedule": schedule,
+        "idle_at": idle_at.isoformat() if idle_at else None,
+        "utilization": {
+            "busy_pct_last_hour": round(busy_seconds_last_hour / 36, 1),
+            "units_in_24h": float(ledger_sums["units_in"]),
+            "units_out_24h": units_out_24h,
+            "pct_of_ceiling_24h": pct_of_ceiling,
+        },
+        "parts": parts,
+        "bom_work": bom_work,
+        "plan": load_plan_row(zone_id),
+        "ledger": ledger,
+    }
+
+
 def fetch_order_history() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -1686,6 +1866,17 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
         if path == "/api/schedule":
             try:
                 json_response(self, HTTPStatus.OK, fetch_schedule())
+            except Exception as exc:
+                json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        if path == "/api/station":
+            try:
+                zone_id = query.get("zone", [""])[0].strip()
+                if not zone_id:
+                    raise ValueError("zone parameter is required")
+                json_response(self, HTTPStatus.OK, fetch_station(zone_id))
+            except ValueError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return

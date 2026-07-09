@@ -143,6 +143,11 @@ function selectZone(zoneId) {
       document.querySelector("#capacityMsg").textContent =
         capInfo.capacity ? `${capInfo.capacity} unit(s) at a time` : "Unconstrained";
     }
+    const stationLink = document.querySelector("#stationLink");
+    if (stationLink) {
+      stationLink.hidden = !isWorkstation;
+      stationLink.href = `station.html?zone=${encodeURIComponent(zoneId)}`;
+    }
   }
 
   zoneNodes.forEach((node) => {
