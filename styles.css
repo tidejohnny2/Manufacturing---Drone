@@ -2127,6 +2127,15 @@ body.view-rework .shipping-route {
   font-size: 1.2rem;
 }
 
+/* Subledger account codes (C-1001 customers, V-2001 vendors). */
+.acct-code {
+  color: #64748b;
+  font-size: 0.78em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 /* Order intake: the test-email body editor. */
 .intake-body {
   width: 100%;

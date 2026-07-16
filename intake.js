@@ -76,7 +76,7 @@ function renderIntake(data) {
           return `
             <tr>
               <td>${esc(so.so_no)}</td>
-              <td>${esc(so.customer)}</td>
+              <td><span class="acct-code">${esc(so.customer_code ?? "")}</span> ${esc(so.customer)}</td>
               <td>${lines}</td>
               <td>${money(so.value)}</td>
               <td>${so.requested_date ? esc(so.requested_date) : "—"}</td>

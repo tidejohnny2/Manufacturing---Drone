@@ -59,6 +59,7 @@ function renderSales(data) {
     .map(
       (c) => `
         <tr data-id="${c.id}">
+          <td><span class="acct-code">${esc(c.account_code ?? "")}</span></td>
           <td><input class="acct-input cust-field" data-field="name" maxlength="120" value="${esc(c.name)}" /></td>
           <td><input class="acct-input cust-field" data-field="contact" maxlength="120" value="${esc(c.contact)}" /></td>
           <td><input class="acct-input cust-field" data-field="terms" maxlength="40" value="${esc(c.terms)}" /></td>
@@ -93,7 +94,7 @@ function renderSales(data) {
           return `
             <tr>
               <td>${esc(o.so_no)}</td>
-              <td>${esc(o.customer)}</td>
+              <td><span class="acct-code">${esc(o.customer_code ?? "")}</span> ${esc(o.customer)}</td>
               <td>${lines}</td>
               <td>${money(o.subtotal)}</td>
               <td>${esc(o.status)}</td>
@@ -111,7 +112,7 @@ function renderSales(data) {
             <tr>
               <td>${esc(inv.invoice_no)}</td>
               <td>${esc(inv.so_no)}</td>
-              <td>${esc(inv.customer)}</td>
+              <td><span class="acct-code">${esc(inv.customer_code ?? "")}</span> ${esc(inv.customer)}</td>
               <td>${new Date(inv.invoiced_at).toLocaleString()}</td>
               <td>${money(inv.subtotal)}</td>
               <td>${money(inv.cogs)}</td>

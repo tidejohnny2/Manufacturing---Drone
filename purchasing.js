@@ -95,7 +95,7 @@ function renderPurchasing(data) {
           return `
             <tr>
               <td>${esc(po.po_no)}</td>
-              <td>${esc(po.vendor)}</td>
+              <td><span class="acct-code">${esc(po.vendor_code ?? "")}</span> ${esc(po.vendor)}</td>
               <td>${lines}</td>
               <td>${money(po.total)}</td>
               <td>${status}</td>
@@ -136,6 +136,7 @@ function renderPurchasing(data) {
     .map(
       (v) => `
         <tr data-id="${v.id}">
+          <td><span class="acct-code">${esc(v.account_code ?? "")}</span></td>
           <td><input class="acct-input vend-field" data-field="name" maxlength="120" value="${esc(v.name)}" /></td>
           <td><input class="acct-input vend-field" data-field="contact" maxlength="120" value="${esc(v.contact)}" /></td>
           <td><input class="acct-input vend-field" data-field="terms" maxlength="40" value="${esc(v.terms)}" /></td>

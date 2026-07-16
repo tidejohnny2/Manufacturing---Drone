@@ -3106,6 +3106,19 @@ def _next_sales_number(cur, table: str, column: str, prefix: str) -> str:
     return f"{prefix}{cur.fetchone()['next']}"
 
 
+def _next_account_code(cur, table: str, prefix: str, floor: int) -> str:
+    """Next subledger account code (C-1001+, V-2001+); permanent once assigned."""
+    cur.execute(
+        f"""
+        SELECT COALESCE(MAX(substring(account_code FROM {len(prefix) + 1})::int), %s) + 1 AS next
+        FROM {table}
+        WHERE account_code ~ %s
+        """,
+        (floor, f"^{prefix}[0-9]+$"),
+    )
+    return f"{prefix}{cur.fetchone()['next']}"
+
+
 def fetch_sales() -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -3114,12 +3127,12 @@ def fetch_sales() -> dict:
                 raise ValueError("Sales tables are not installed yet.")
             cur.execute(
                 """
-                SELECT c.id, c.name, c.contact, c.terms,
+                SELECT c.id, c.account_code, c.name, c.contact, c.terms,
                        COUNT(so.id) AS order_count
                 FROM customers c
                 LEFT JOIN sales_orders so ON so.customer_id = c.id
-                GROUP BY c.id, c.name, c.contact, c.terms
-                ORDER BY c.name
+                GROUP BY c.id, c.account_code, c.name, c.contact, c.terms
+                ORDER BY c.account_code
                 """
             )
             customers = cur.fetchall()
@@ -3137,7 +3150,7 @@ def fetch_sales() -> dict:
             cur.execute(
                 """
                 SELECT so.id, so.so_no, so.status, so.requested_date, so.created_at,
-                       c.name AS customer
+                       c.name AS customer, c.account_code AS customer_code
                 FROM sales_orders so
                 JOIN customers c ON c.id = so.customer_id
                 ORDER BY so.id DESC
@@ -3172,7 +3185,8 @@ def fetch_sales() -> dict:
                     order["can_fulfill"] = None
             cur.execute(
                 """
-                SELECT i.invoice_no, so.so_no, c.name AS customer, i.subtotal, i.cogs,
+                SELECT i.invoice_no, so.so_no, c.name AS customer,
+                       c.account_code AS customer_code, i.subtotal, i.cogs,
                        i.invoiced_at
                 FROM invoices i
                 JOIN sales_orders so ON so.id = i.sales_order_id
@@ -3202,9 +3216,10 @@ def manage_customer(payload: dict) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if action == "create":
+                code = _next_account_code(cur, "customers", "C-", 1000)
                 cur.execute(
-                    "INSERT INTO customers (name, contact, terms) VALUES (%s, %s, %s) RETURNING id",
-                    (name, contact, terms),
+                    "INSERT INTO customers (name, contact, terms, account_code) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (name, contact, terms, code),
                 )
                 customer_id = cur.fetchone()["id"]
             elif action == "update":
@@ -3284,7 +3299,8 @@ def ship_and_invoice(payload: dict) -> dict:
                 raise ValueError("Costing tables are not installed yet.")
             cur.execute(
                 """
-                SELECT so.id, so.status, so.customer_id, c.name AS customer
+                SELECT so.id, so.status, so.customer_id, c.name AS customer,
+                       c.account_code AS customer_code
                 FROM sales_orders so JOIN customers c ON c.id = so.customer_id
                 WHERE so.so_no = %s
                 """,
@@ -3354,9 +3370,10 @@ def ship_and_invoice(payload: dict) -> dict:
                     (zone, sku, quantity, invoice_no),
                 )
 
+            customer_ref = f"{order['customer_code']} {order['customer']}" if order.get("customer_code") else order["customer"]
             post_cost_entry(
                 cur, f"INV{invoice_id}-REV", None, invoice_no, "revenue",
-                f"{invoice_no}: invoice {order['customer']} for {so_no}",
+                f"{invoice_no}: invoice {customer_ref} for {so_no}",
                 [(AR_ACCOUNT, subtotal, 0), (SALES_ACCOUNT, 0, subtotal)],
             )
             cogs_lines = [(COGS_ACCOUNT, cogs_total, 0)]
@@ -3449,12 +3466,12 @@ def fetch_purchasing() -> dict:
 
             cur.execute(
                 """
-                SELECT v.id, v.name, v.contact, v.terms, v.lead_time_days,
+                SELECT v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days,
                        COUNT(po.id) AS po_count
                 FROM vendors v
                 LEFT JOIN purchase_orders po ON po.vendor_id = v.id
-                GROUP BY v.id, v.name, v.contact, v.terms, v.lead_time_days
-                ORDER BY v.name
+                GROUP BY v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days
+                ORDER BY v.account_code
                 """
             )
             vendors = cur.fetchall()
@@ -3587,7 +3604,7 @@ def fetch_purchasing() -> dict:
             cur.execute(
                 """
                 SELECT po.id, po.po_no, po.status, po.created_at, po.received_at,
-                       v.name AS vendor
+                       v.name AS vendor, v.account_code AS vendor_code
                 FROM purchase_orders po
                 JOIN vendors v ON v.id = po.vendor_id
                 ORDER BY po.id DESC
@@ -3653,9 +3670,10 @@ def manage_vendor(payload: dict) -> dict:
         with conn.cursor() as cur:
             _purchasing_ready(cur)
             if action == "create":
+                code = _next_account_code(cur, "vendors", "V-", 2000)
                 cur.execute(
-                    "INSERT INTO vendors (name, contact, terms, lead_time_days) VALUES (%s, %s, %s, %s) RETURNING id",
-                    (name, contact, terms, lead_time),
+                    "INSERT INTO vendors (name, contact, terms, lead_time_days, account_code) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                    (name, contact, terms, lead_time, code),
                 )
                 vendor_id = cur.fetchone()["id"]
             elif action == "update":
@@ -3848,7 +3866,8 @@ def receive_vendor_po(payload: dict) -> dict:
             _purchasing_ready(cur)
             cur.execute(
                 """
-                SELECT po.id, po.status, v.name AS vendor
+                SELECT po.id, po.status, v.name AS vendor,
+                       v.account_code AS vendor_code
                 FROM purchase_orders po JOIN vendors v ON v.id = po.vendor_id
                 WHERE po.po_no = %s
                 """,
@@ -3915,9 +3934,10 @@ def receive_vendor_po(payload: dict) -> dict:
                     repriced.append(part)
 
             total = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
+            vendor_ref = f"{po['vendor_code']} {po['vendor']}" if po.get("vendor_code") else po["vendor"]
             post_cost_entry(
                 cur, f"{po_no}-RCV", None, po_no, "po_receipt",
-                f"{po_no}: receive {len(lines)} line(s) from {po['vendor']} at PO prices",
+                f"{po_no}: receive {len(lines)} line(s) from {vendor_ref} at PO prices",
                 [(RM_ACCOUNT, total, 0), (AP_ACCOUNT, 0, total)],
             )
             cur.execute(
@@ -4174,9 +4194,10 @@ def _resolve_or_create_customer(cur, name, from_email) -> int:
     row = cur.fetchone()
     if row:
         return row["id"]
+    code = _next_account_code(cur, "customers", "C-", 1000)
     cur.execute(
-        "INSERT INTO customers (name, contact, terms) VALUES (%s, %s, 'Net 30') RETURNING id",
-        (name[:120] or from_email[:120] or "Email customer", from_email[:120]),
+        "INSERT INTO customers (name, contact, terms, account_code) VALUES (%s, %s, 'Net 30', %s) RETURNING id",
+        (name[:120] or from_email[:120] or "Email customer", from_email[:120], code),
     )
     return cur.fetchone()["id"]
 
@@ -4455,7 +4476,8 @@ def fetch_intake() -> dict:
             cur.execute(
                 """
                 SELECT so.id, so.so_no, so.status, so.requested_date, so.accepted_at,
-                       so.created_at, c.name AS customer, e.subject AS email_subject
+                       so.created_at, c.name AS customer,
+                       c.account_code AS customer_code, e.subject AS email_subject
                 FROM sales_orders so
                 JOIN customers c ON c.id = so.customer_id
                 LEFT JOIN inbound_emails e ON e.id = so.source_email_id
