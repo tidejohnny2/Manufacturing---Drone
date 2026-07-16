@@ -3984,7 +3984,8 @@ def _mailbox_error_text(exc: Exception) -> str:
     for arg in getattr(exc, "args", None) or []:
         parts.append(arg.decode("utf-8", "replace") if isinstance(arg, (bytes, bytearray)) else str(arg))
     text = " ".join(parts).strip() or str(exc)
-    if "AUTHENTICATIONFAILED" in text.upper():
+    # Idempotent: nested handlers may pass an already-hinted message through.
+    if "AUTHENTICATIONFAILED" in text.upper() and "app password" not in text:
         text += " — Gmail rejects regular passwords for IMAP; create an app password at myaccount.google.com/apppasswords."
     return text
 
