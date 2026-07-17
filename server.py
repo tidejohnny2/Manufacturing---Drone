@@ -2703,6 +2703,62 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
             (company_id,),
         )
 
+    # Product Line SPLIT on the aggregate revenue (4000) and COGS (5010)
+    # lines — these are single lines per invoice, so they carry a proportional
+    # multi-tag distribution instead of one 100% tag. This is what makes the
+    # Product Line dimension show revenue/COGS/margin. (Idempotent via the
+    # (cost_line_id, account_tag_id) unique + ON CONFLICT DO NOTHING; % is
+    # deterministic from the same source amounts.)
+    # Revenue split by the sales-order lines' per-SKU value.
+    cur.execute(
+        """
+        WITH rev_split AS (
+          SELECT e.id AS entry_id, sol.sku, SUM(sol.quantity * sol.unit_price) AS amt
+          FROM cost_entries e
+          JOIN invoices inv ON inv.invoice_no = e.order_no
+          JOIN sales_order_lines sol ON sol.sales_order_id = inv.sales_order_id
+          WHERE e.company_id = %s AND e.event_type = 'revenue'
+          GROUP BY e.id, sol.sku
+        ),
+        rev_total AS (SELECT entry_id, SUM(amt) AS total FROM rev_split GROUP BY entry_id)
+        INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage)
+        SELECT sl.id, t.id, ROUND(100.0 * rs.amt / rt.total, 4)
+        FROM rev_split rs
+        JOIN rev_total rt ON rt.entry_id = rs.entry_id
+        JOIN cost_lines sl ON sl.entry_id = rs.entry_id AND sl.account_no = '4000'
+        JOIN tag_groups g ON g.company_id = %s AND g.name = 'Product Line'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = rs.sku
+        WHERE rt.total > 0
+        ON CONFLICT DO NOTHING
+        """,
+        (company_id, company_id),
+    )
+    # COGS split by the sibling 1330/1315 credits in the same entry.
+    cur.execute(
+        """
+        WITH cogs_split AS (
+          SELECT e.id AS entry_id, cl.account_no, SUM(cl.credit) AS amt
+          FROM cost_entries e
+          JOIN cost_lines cl ON cl.entry_id = e.id
+          WHERE e.company_id = %s AND e.event_type = 'cogs'
+            AND cl.account_no IN ('1330', '1315') AND cl.credit > 0
+          GROUP BY e.id, cl.account_no
+        ),
+        cogs_total AS (SELECT entry_id, SUM(amt) AS total FROM cogs_split GROUP BY entry_id)
+        INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage)
+        SELECT dl.id, t.id, ROUND(100.0 * cs.amt / ct.total, 4)
+        FROM cogs_split cs
+        JOIN cogs_total ct ON ct.entry_id = cs.entry_id
+        JOIN cost_lines dl ON dl.entry_id = cs.entry_id AND dl.account_no = '5010'
+        JOIN tag_groups g ON g.company_id = %s AND g.name = 'Product Line'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference =
+             CASE WHEN cs.account_no = '1330' THEN 'DRN-FG-600' ELSE 'CASE-FG-500' END
+        WHERE ct.total > 0
+        ON CONFLICT DO NOTHING
+        """,
+        (company_id, company_id),
+    )
+
 
 def fetch_cost_ledger(
     order_no: str | None,
