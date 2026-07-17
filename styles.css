@@ -2127,6 +2127,36 @@ body.view-rework .shipping-route {
   font-size: 1.2rem;
 }
 
+/* Multi-company header switcher (accounting pages). */
+.company-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--oa-accent);
+  border-radius: 6px;
+  background: var(--oa-accent-tint);
+}
+
+.company-switcher .company-label {
+  color: var(--oa-accent-ink);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.company-switcher select {
+  min-height: 30px;
+  padding: 2px 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-weight: 700;
+}
+
 /* Subledger account codes (C-1001 customers, V-2001 vendors). */
 .acct-code {
   color: #64748b;

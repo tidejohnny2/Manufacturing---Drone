@@ -110,7 +110,8 @@ function renderAccounts(data) {
 }
 
 async function getJson(path) {
-  const response = await fetch(path);
+  // withCompany (company.js) scopes the fetch to the active company.
+  const response = await fetch(withCompany(path));
   const data = await response.json();
   if (!response.ok || data.error) {
     throw new Error(data.error ?? `Unable to load ${path}`);
@@ -126,6 +127,7 @@ async function accountAction(body, successText) {
   accountsMsg.textContent = "Saving…";
   accountsMsg.className = "kit-verdict";
   body.actor = document.querySelector("#accountsActor").value.trim();
+  body.companyId = companyId();
   try {
     const response = await fetch("/api/costing/accounts", {
       method: "POST",

@@ -2180,8 +2180,10 @@ def cost_card(cur, costing, sku, _depth=0) -> dict:
     }
 
 
-def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines) -> bool:
-    """Insert one balanced double-entry journal entry; idempotent by event_ref."""
+def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines, company_id=1) -> bool:
+    """Insert one balanced double-entry journal entry; idempotent by event_ref.
+    company_id scopes the entry to a company's books (1 = the plant, and the
+    default for every engine posting)."""
     lines = [
         (account, round(debit, 2), round(credit, 2))
         for account, debit, credit in lines
@@ -2197,20 +2199,20 @@ def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines)
         )
     cur.execute(
         """
-        INSERT INTO cost_entries (event_ref, production_order_id, order_no, event_type, memo)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO cost_entries (event_ref, production_order_id, order_no, event_type, memo, company_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (event_ref) DO NOTHING
         RETURNING id
         """,
-        (event_ref, order_id, order_no, event_type, memo),
+        (event_ref, order_id, order_no, event_type, memo, company_id),
     )
     inserted = cur.fetchone()
     if not inserted:
         return False
     for account, debit, credit in lines:
         cur.execute(
-            "INSERT INTO cost_lines (entry_id, account_no, debit, credit) VALUES (%s, %s, %s, %s)",
-            (inserted["id"], account, debit, credit),
+            "INSERT INTO cost_lines (entry_id, account_no, debit, credit, company_id) VALUES (%s, %s, %s, %s, %s)",
+            (inserted["id"], account, debit, credit, company_id),
         )
     return True
 
@@ -2460,17 +2462,19 @@ def run_simulation_sync(cur) -> list[dict]:
     return all_states
 
 
-def account_balances(cur) -> list[dict]:
+def account_balances(cur, company_id=1) -> list[dict]:
     cur.execute(
         """
         SELECT a.account_no, a.name, a.account_type, a.normal_side,
                COALESCE(SUM(l.debit), 0) AS total_debit,
                COALESCE(SUM(l.credit), 0) AS total_credit
         FROM gl_accounts a
-        LEFT JOIN cost_lines l ON l.account_no = a.account_no
+        LEFT JOIN cost_lines l ON l.account_no = a.account_no AND l.company_id = a.company_id
+        WHERE a.company_id = %s
         GROUP BY a.account_no, a.name, a.account_type, a.normal_side
         ORDER BY a.account_no
-        """
+        """,
+        (company_id,),
     )
     rows = []
     for row in cur.fetchall():
@@ -2614,6 +2618,7 @@ def fetch_cost_ledger(
     event_type: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    company_id: int = 1,
 ) -> dict:
     date_from = _ledger_date(date_from, "dateFrom")
     date_to = _ledger_date(date_to, "dateTo")
@@ -2621,8 +2626,8 @@ def fetch_cost_ledger(
         with conn.cursor() as cur:
             if not costing_ready(cur):
                 raise ValueError("Costing tables are not installed yet.")
-            clauses: list[str] = []
-            params: list[object] = []
+            clauses: list[str] = ["e.company_id = %s"]
+            params: list[object] = [company_id]
             if order_no:
                 clauses.append("e.order_no = %s")
                 params.append(order_no)
@@ -2676,22 +2681,29 @@ def fetch_cost_ledger(
                     lines_by_entry.setdefault(line["entry_id"], []).append(line)
             for entry in entries:
                 entry["lines"] = lines_by_entry.get(entry["id"], [])
-            cur.execute("SELECT DISTINCT event_type FROM cost_entries ORDER BY event_type")
+            cur.execute(
+                "SELECT DISTINCT event_type FROM cost_entries WHERE company_id = %s ORDER BY event_type",
+                (company_id,),
+            )
             event_types = [row["event_type"] for row in cur.fetchall()]
     return {"entries": entries, "has_more": has_more, "total": total, "event_types": event_types}
 
 
-def fetch_trial_balance() -> dict:
+def fetch_trial_balance(company_id=1) -> dict:
     """Trial balance plus the control checks: balanced books, balanced
-    entries, GL-to-operations ties, and ledger immutability."""
+    entries, GL-to-operations ties, and ledger immutability. Scoped to a
+    company; the physical-tie controls apply to the plant (company 1) only —
+    other companies have no floor, so those ties are vacuously satisfied."""
+    is_plant = company_id == 1
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            states = run_simulation_sync(cur)
+            # Only the plant advances the physical simulation.
+            states = run_simulation_sync(cur) if is_plant else []
             conn.commit()
             costing = load_costing(cur)
             if costing is None:
                 raise ValueError("Costing tables are not installed yet.")
-            balances = account_balances(cur)
+            balances = account_balances(cur, company_id)
             total_debit = round(sum(row["total_debit"] for row in balances), 2)
             total_credit = round(sum(row["total_credit"] for row in balances), 2)
 
@@ -2700,51 +2712,64 @@ def fetch_trial_balance() -> dict:
                 SELECT e.event_ref
                 FROM cost_entries e
                 JOIN cost_lines l ON l.entry_id = e.id
+                WHERE e.company_id = %s
                 GROUP BY e.id, e.event_ref
                 HAVING ABS(SUM(l.debit) - SUM(l.credit)) > 0.01
-                """
+                """,
+                (company_id,),
             )
             unbalanced = [row["event_ref"] for row in cur.fetchall()]
 
-            cards = {
-                "DRN-FG-600": cost_card(cur, costing, "DRN-FG-600"),
-                "CASE-FG-500": cost_card(cur, costing, "CASE-FG-500"),
-            }
-            # Expected WIP: what the posting rules should have absorbed so far.
-            expected_wip = 0.0
-            case_in_transit = 0.0
-            for state in states:
-                order = state["order"]
-                if order["production_status"] in ("complete", "queued"):
-                    continue
-                card = cards.setdefault(
-                    order["finished_good"], cost_card(cur, costing, order["finished_good"])
-                )
-                quantity = order["quantity"]
-                completed_zones = {
-                    row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+            expected_wip = case_expected = fg_expected = received_total = 0.0
+            if is_plant:
+                cards = {
+                    "DRN-FG-600": cost_card(cur, costing, "DRN-FG-600"),
+                    "CASE-FG-500": cost_card(cur, costing, "CASE-FG-500"),
                 }
-                conv_done = sum(
-                    row["dl"] + row["oh"]
-                    for row in station_conversion(card, costing, quantity)
-                    if row["zone_id"] in completed_zones
-                )
-                expected_wip = round(expected_wip + round(card["dm_std"] * quantity, 2) + conv_done, 2)
-                if order["finished_good"] == "DRN-FG-600":
-                    case_line = next(
-                        (line for line in card["dm_lines"] if line["source"] == "make"), None
+                # Expected WIP: what the posting rules should have absorbed so far.
+                case_in_transit = 0.0
+                for state in states:
+                    order = state["order"]
+                    if order["production_status"] in ("complete", "queued"):
+                        continue
+                    card = cards.setdefault(
+                        order["finished_good"], cost_card(cur, costing, order["finished_good"])
                     )
-                    if case_line:
-                        case_in_transit = round(case_in_transit + case_line["ext_std"] * quantity, 2)
+                    quantity = order["quantity"]
+                    completed_zones = {
+                        row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+                    }
+                    conv_done = sum(
+                        row["dl"] + row["oh"]
+                        for row in station_conversion(card, costing, quantity)
+                        if row["zone_id"] in completed_zones
+                    )
+                    expected_wip = round(expected_wip + round(card["dm_std"] * quantity, 2) + conv_done, 2)
+                    if order["finished_good"] == "DRN-FG-600":
+                        case_line = next(
+                            (line for line in card["dm_lines"] if line["source"] == "make"), None
+                        )
+                        if case_line:
+                            case_in_transit = round(case_in_transit + case_line["ext_std"] * quantity, 2)
 
-            cur.execute(
-                "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
-            )
-            stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
-            case_expected = round(
-                stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
-            )
-            fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
+                cur.execute(
+                    "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+                )
+                stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+                case_expected = round(
+                    stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
+                )
+                fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
+                cur.execute(
+                    """
+                    SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
+                    FROM purchase_order_lines l
+                    JOIN purchase_orders p ON p.id = l.purchase_order_id
+                    WHERE p.status = 'received' AND p.company_id = %s
+                    """,
+                    (company_id,),
+                )
+                received_total = round(float(cur.fetchone()["total"]), 2)
 
             cur.execute(
                 "SELECT tgname FROM pg_trigger WHERE tgname IN ('cost_entries_immutable', 'cost_lines_immutable')"
@@ -2757,6 +2782,7 @@ def fetch_trial_balance() -> dict:
             wip_gl = gl_balance(balances, WIP_ACCOUNT)
             case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
             fg_gl = gl_balance(balances, FG_ACCOUNT)
+            ap_gl = gl_balance(balances, AP_ACCOUNT)
             controls = [
                 control(
                     "Trial balance in balance",
@@ -2790,26 +2816,12 @@ def fetch_trial_balance() -> dict:
                     if len(triggers) == 2
                     else "Missing immutability trigger(s)",
                 ),
+                control(
+                    "Accounts Payable ties to received vendor POs",
+                    abs(ap_gl - received_total) <= 0.01,
+                    f"GL {ap_gl:,.2f} vs received PO total {received_total:,.2f}",
+                ),
             ]
-            cur.execute("SELECT to_regclass('purchase_orders') AS reg")
-            if cur.fetchone()["reg"] is not None:
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
-                    FROM purchase_order_lines l
-                    JOIN purchase_orders p ON p.id = l.purchase_order_id
-                    WHERE p.status = 'received'
-                    """
-                )
-                received_total = round(float(cur.fetchone()["total"]), 2)
-                ap_gl = gl_balance(balances, AP_ACCOUNT)
-                controls.append(
-                    control(
-                        "Accounts Payable ties to received vendor POs",
-                        abs(ap_gl - received_total) <= 0.01,
-                        f"GL {ap_gl:,.2f} vs received PO total {received_total:,.2f}",
-                    )
-                )
     return {
         "accounts": balances,
         "total_debit": total_debit,
@@ -2957,7 +2969,20 @@ PROTECTED_GL_ACCOUNTS = {
 GL_ACCOUNT_TYPES = ("asset", "liability", "equity", "income", "expense", "variance")
 
 
-def fetch_gl_accounts() -> dict:
+def fetch_companies() -> dict:
+    """Active companies for the header switcher (company 1 = the plant)."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('companies') AS reg")
+            if cur.fetchone()["reg"] is None:
+                return {"companies": [{"id": 1, "name": "Drone Plant", "code": "PLANT"}]}
+            cur.execute(
+                "SELECT id, name, code FROM companies WHERE active ORDER BY id"
+            )
+            return {"companies": cur.fetchall()}
+
+
+def fetch_gl_accounts(company_id=1) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if not costing_ready(cur):
@@ -2969,10 +2994,12 @@ def fetch_gl_accounts() -> dict:
                        COALESCE(SUM(l.debit), 0) AS total_debit,
                        COALESCE(SUM(l.credit), 0) AS total_credit
                 FROM gl_accounts a
-                LEFT JOIN cost_lines l ON l.account_no = a.account_no
+                LEFT JOIN cost_lines l ON l.account_no = a.account_no AND l.company_id = a.company_id
+                WHERE a.company_id = %s
                 GROUP BY a.account_no, a.name, a.account_type, a.normal_side
                 ORDER BY a.account_no
-                """
+                """,
+                (company_id,),
             )
             accounts = []
             for row in cur.fetchall():
@@ -2986,7 +3013,8 @@ def fetch_gl_accounts() -> dict:
                     "normal_side": row["normal_side"],
                     "posting_count": row["posting_count"],
                     "balance": balance,
-                    "protected": row["account_no"] in PROTECTED_GL_ACCOUNTS,
+                    # Engine-protected accounts are the plant's (company 1) only.
+                    "protected": company_id == 1 and row["account_no"] in PROTECTED_GL_ACCOUNTS,
                 })
     return {"accounts": accounts, "account_types": list(GL_ACCOUNT_TYPES)}
 
@@ -2999,20 +3027,23 @@ def manage_gl_account(payload: dict) -> dict:
     action = str(payload.get("action", "")).strip()
     account_no = str(payload.get("accountNo", "")).strip()
     actor = str(payload.get("actor", "")).strip() or "controller"
+    company_id = int(payload.get("companyId", 1) or 1)
     if action not in ("create", "update", "delete"):
         raise ValueError("action must be create, update, or delete.")
     if not account_no or len(account_no) > 10 or not account_no.replace("-", "").isalnum():
         raise ValueError("Account number must be 1-10 letters/digits.")
+    is_protected = company_id == 1 and account_no in PROTECTED_GL_ACCOUNTS
 
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT a.account_no, a.name, a.account_type, a.normal_side,
-                       (SELECT COUNT(*) FROM cost_lines l WHERE l.account_no = a.account_no) AS postings
-                FROM gl_accounts a WHERE a.account_no = %s
+                       (SELECT COUNT(*) FROM cost_lines l
+                        WHERE l.account_no = a.account_no AND l.company_id = a.company_id) AS postings
+                FROM gl_accounts a WHERE a.account_no = %s AND a.company_id = %s
                 """,
-                (account_no,),
+                (account_no, company_id),
             )
             existing = cur.fetchone()
 
@@ -3038,15 +3069,15 @@ def manage_gl_account(payload: dict) -> dict:
                 if normal_side not in ("debit", "credit"):
                     raise ValueError("normalSide must be debit or credit.")
                 cur.execute(
-                    "INSERT INTO gl_accounts (account_no, name, account_type, normal_side) VALUES (%s, %s, %s, %s)",
-                    (account_no, name, account_type, normal_side),
+                    "INSERT INTO gl_accounts (account_no, name, account_type, normal_side, company_id) VALUES (%s, %s, %s, %s, %s)",
+                    (account_no, name, account_type, normal_side, company_id),
                 )
                 audit("created", None, f"{name} ({account_type}/{normal_side})")
 
             elif action == "update":
                 if not existing:
                     raise ValueError(f"Unknown account {account_no}.")
-                locked = existing["postings"] > 0 or account_no in PROTECTED_GL_ACCOUNTS
+                locked = existing["postings"] > 0 or is_protected
                 name = str(payload.get("name", "")).strip()
                 account_type = str(payload.get("accountType", existing["account_type"])).strip()
                 normal_side = str(payload.get("normalSide", existing["normal_side"])).strip()
@@ -3068,18 +3099,18 @@ def manage_gl_account(payload: dict) -> dict:
                 if normal_side != existing["normal_side"]:
                     audit("normal_side", existing["normal_side"], normal_side)
                 cur.execute(
-                    "UPDATE gl_accounts SET name = %s, account_type = %s, normal_side = %s WHERE account_no = %s",
-                    (name, account_type, normal_side, account_no),
+                    "UPDATE gl_accounts SET name = %s, account_type = %s, normal_side = %s WHERE account_no = %s AND company_id = %s",
+                    (name, account_type, normal_side, account_no, company_id),
                 )
 
             else:  # delete
                 if not existing:
                     raise ValueError(f"Unknown account {account_no}.")
-                if account_no in PROTECTED_GL_ACCOUNTS:
+                if is_protected:
                     raise ValueError("That account is used by the posting engine and cannot be deleted.")
                 if existing["postings"] > 0:
                     raise ValueError("Accounts with postings cannot be deleted (the ledger is immutable).")
-                cur.execute("DELETE FROM gl_accounts WHERE account_no = %s", (account_no,))
+                cur.execute("DELETE FROM gl_accounts WHERE account_no = %s AND company_id = %s", (account_no, company_id))
                 audit("deleted", f"{existing['name']} ({existing['account_type']}/{existing['normal_side']})", None)
 
         conn.commit()
@@ -5695,6 +5726,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/costing/trial-balance",
             "/api/costing/standards",
             "/api/costing/accounts",
+            "/api/companies",
             "/api/sales",
             "/api/purchasing",
             "/api/intake",
@@ -5702,7 +5734,11 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/audit/certifications",
         ):
             try:
-                if path == "/api/costing/cost-cards":
+                # Active company from the header switcher (default 1 = the plant).
+                company = int(query.get("company", ["1"])[0] or 1)
+                if path == "/api/companies":
+                    payload = fetch_companies()
+                elif path == "/api/costing/cost-cards":
                     payload = fetch_cost_cards()
                 elif path == "/api/costing/wip":
                     payload = fetch_costing_wip()
@@ -5719,11 +5755,12 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                         event_type=query.get("eventType", [None])[0],
                         date_from=query.get("dateFrom", [None])[0],
                         date_to=query.get("dateTo", [None])[0],
+                        company_id=company,
                     )
                 elif path == "/api/costing/trial-balance":
-                    payload = fetch_trial_balance()
+                    payload = fetch_trial_balance(company)
                 elif path == "/api/costing/accounts":
-                    payload = fetch_gl_accounts()
+                    payload = fetch_gl_accounts(company)
                 elif path == "/api/sales":
                     payload = fetch_sales()
                 elif path == "/api/purchasing":
