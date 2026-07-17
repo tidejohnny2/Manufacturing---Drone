@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 
+import gl_backed
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -2758,6 +2760,19 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
         """,
         (company_id, company_id),
     )
+
+
+def refresh_source_tags(company_id: int) -> None:
+    """Keep the local analytic-tag overlay current when the reporting pages are
+    served from the GL. apply_auto_tags normally runs on the local read paths
+    (fetch_cost_ledger / fetch_analytics) that GL_READS bypasses; the mirror
+    then copies the fresh tags into the GL. Best-effort."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('tag_distributions') AS reg")
+            if cur.fetchone()["reg"] is not None:
+                apply_auto_tags(cur, company_id)
+        conn.commit()
 
 
 def fetch_cost_ledger(
@@ -6089,7 +6104,15 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 if path == "/api/companies":
                     payload = fetch_companies()
                 elif path == "/api/analytics":
-                    payload = fetch_analytics(company, query.get("group", [None])[0])
+                    group_name = query.get("group", [None])[0]
+                    if gl_backed.enabled():
+                        try:
+                            refresh_source_tags(company)
+                            payload = gl_backed.analytics(company, group_name)
+                        except Exception:
+                            payload = fetch_analytics(company, group_name)
+                    else:
+                        payload = fetch_analytics(company, group_name)
                 elif path == "/api/costing/cost-cards":
                     payload = fetch_cost_cards()
                 elif path == "/api/costing/wip":
@@ -6100,15 +6123,27 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     order_no = query.get("orderNo", [None])[0]
                     limit = min(max(int(query.get("limit", ["30"])[0]), 1), 200)
                     before_raw = query.get("beforeId", [None])[0]
-                    payload = fetch_cost_ledger(
-                        order_no,
-                        limit,
-                        before_id=int(before_raw) if before_raw else None,
-                        event_type=query.get("eventType", [None])[0],
-                        date_from=query.get("dateFrom", [None])[0],
-                        date_to=query.get("dateTo", [None])[0],
-                        company_id=company,
-                    )
+                    before_id = int(before_raw) if before_raw else None
+                    event_type = query.get("eventType", [None])[0]
+                    date_from = query.get("dateFrom", [None])[0]
+                    date_to = query.get("dateTo", [None])[0]
+                    if gl_backed.enabled():
+                        try:
+                            refresh_source_tags(company)
+                            payload = gl_backed.ledger(
+                                company, order_no=order_no, limit=limit, before_id=before_id,
+                                event_type=event_type, date_from=date_from, date_to=date_to,
+                            )
+                        except Exception:
+                            payload = fetch_cost_ledger(
+                                order_no, limit, before_id=before_id, event_type=event_type,
+                                date_from=date_from, date_to=date_to, company_id=company,
+                            )
+                    else:
+                        payload = fetch_cost_ledger(
+                            order_no, limit, before_id=before_id, event_type=event_type,
+                            date_from=date_from, date_to=date_to, company_id=company,
+                        )
                 elif path == "/api/costing/trial-balance":
                     payload = fetch_trial_balance(company)
                 elif path == "/api/costing/accounts":
