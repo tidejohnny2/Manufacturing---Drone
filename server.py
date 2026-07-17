@@ -2182,10 +2182,113 @@ def cost_card(cur, costing, sku, _depth=0) -> dict:
     }
 
 
+def _product_line_tag(cur, sku):
+    """The Product Line tag name for a finished-good SKU (e.g. 'Drone'/'Case'),
+    from the seeded tag definitions."""
+    cur.execute(
+        "SELECT at.name FROM account_tags at "
+        "JOIN tag_groups g ON g.id = at.tag_group_id AND g.name = 'Product Line' "
+        "WHERE at.reference = %s LIMIT 1",
+        (sku,),
+    )
+    row = cur.fetchone()
+    return row["name"] if row else None
+
+
+def compute_entry_tags(cur, event_type, reference, lines, company_id):
+    """Per-line analytic tags for a GL post, derived from local ground-truth
+    (orders/invoices/POs/materials). Only the plant (company 1) auto-tags. This
+    replaces the old apply_auto_tags SQL pass — with the ledger in the GL, tags
+    now travel with the journal entry at post time."""
+    tags = [[] for _ in lines]
+    if company_id != 1:
+        return tags
+
+    # Stock accounts always carry their Product Line (covers opening + COGS relief).
+    stock_pl = {"1330": "DRN-FG-600", "1315": "CASE-FG-500"}
+    for i, (account, _d, _c) in enumerate(lines):
+        if account in stock_pl:
+            pl = _product_line_tag(cur, stock_pl[account])
+            if pl:
+                tags[i].append({"group": "Product Line", "tag": pl, "pct": 100})
+
+    if not reference:
+        return tags
+
+    if event_type in ("dm_issue", "conversion", "variances", "fg_transfer"):
+        cur.execute(
+            "SELECT m.sku FROM production_orders po "
+            "JOIN materials m ON m.id = po.finished_material_id WHERE po.order_no = %s",
+            (reference,),
+        )
+        row = cur.fetchone()
+        pl = _product_line_tag(cur, row["sku"]) if row else None
+        cc = ("Assembly Line" if reference.startswith("DRN-PO")
+              else "Case Line" if reference.startswith("CASE-PO") else None)
+        for i, (account, _d, _c) in enumerate(lines):
+            if pl and account not in stock_pl:
+                tags[i].append({"group": "Product Line", "tag": pl, "pct": 100})
+            if cc:
+                tags[i].append({"group": "Cost Center", "tag": cc, "pct": 100})
+
+    elif event_type in ("revenue", "cogs"):
+        cur.execute("SELECT customer_id, sales_order_id FROM invoices WHERE invoice_no = %s", (reference,))
+        inv = cur.fetchone()
+        cust = None
+        if inv:
+            cur.execute("SELECT name FROM customers WHERE id = %s", (inv["customer_id"],))
+            row = cur.fetchone()
+            cust = row["name"] if row else None
+        if cust:
+            for t in tags:
+                t.append({"group": "Customer", "tag": cust, "pct": 100})
+        if event_type == "revenue" and inv:
+            cur.execute(
+                "SELECT sku, SUM(quantity * unit_price) AS amt FROM sales_order_lines "
+                "WHERE sales_order_id = %s GROUP BY sku",
+                (inv["sales_order_id"],),
+            )
+            rows = cur.fetchall()
+            total = sum(float(r["amt"]) for r in rows)
+            if total > 0:
+                for i, (account, _d, _c) in enumerate(lines):
+                    if account == "4000":
+                        for r in rows:
+                            pl = _product_line_tag(cur, r["sku"])
+                            if pl:
+                                tags[i].append({"group": "Product Line", "tag": pl,
+                                                "pct": round(100 * float(r["amt"]) / total, 4)})
+        if event_type == "cogs":
+            credits = {a: c for a, _d, c in lines if a in ("1330", "1315") and c > 0}
+            total = sum(credits.values())
+            if total > 0:
+                for i, (account, _d, _c) in enumerate(lines):
+                    if account == "5010":
+                        for stock_acct, amt in credits.items():
+                            pl = _product_line_tag(cur, stock_pl[stock_acct])
+                            if pl:
+                                tags[i].append({"group": "Product Line", "tag": pl,
+                                                "pct": round(100 * amt / total, 4)})
+
+    elif event_type == "po_receipt":
+        cur.execute(
+            "SELECT v.name FROM purchase_orders p JOIN vendors v ON v.id = p.vendor_id WHERE p.po_no = %s",
+            (reference,),
+        )
+        row = cur.fetchone()
+        if row:
+            for t in tags:
+                t.append({"group": "Vendor", "tag": row["name"], "pct": 100})
+
+    return tags
+
+
 def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines, company_id=1) -> bool:
-    """Insert one balanced double-entry journal entry; idempotent by event_ref.
-    company_id scopes the entry to a company's books (1 = the plant, and the
-    default for every engine posting)."""
+    """Post one balanced double-entry journal entry to the shared GL as a real
+    journal entry (POST /v1/journal-entries); idempotent by event_ref. Analytic
+    tags are computed from local ground-truth and travel with the entry.
+    (order_id is unused now — the GL keys on event_ref + the order_no reference;
+    cur is kept for the tag lookups and signature compatibility.)"""
     lines = [
         (account, round(debit, 2), round(credit, 2))
         for account, debit, credit in lines
@@ -2199,24 +2302,16 @@ def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines,
         raise RuntimeError(
             f"Unbalanced cost entry {event_ref}: DR {total_debit} vs CR {total_credit}"
         )
-    cur.execute(
-        """
-        INSERT INTO cost_entries (event_ref, production_order_id, order_no, event_type, memo, company_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (event_ref) DO NOTHING
-        RETURNING id
-        """,
-        (event_ref, order_id, order_no, event_type, memo, company_id),
-    )
-    inserted = cur.fetchone()
-    if not inserted:
-        return False
-    for account, debit, credit in lines:
-        cur.execute(
-            "INSERT INTO cost_lines (entry_id, account_no, debit, credit, company_id) VALUES (%s, %s, %s, %s, %s)",
-            (inserted["id"], account, debit, credit, company_id),
-        )
-    return True
+    line_tags = compute_entry_tags(cur, event_type, order_no, lines, company_id)
+    result = gl_backed.gl_post("/v1/journal-entries", {
+        "company": company_id, "ref": event_ref, "type": event_type,
+        "reference": order_no, "memo": memo, "source": "manufacturing",
+        "lines": [
+            {"account": account, "debit": debit, "credit": credit, "tags": line_tags[i]}
+            for i, (account, debit, credit) in enumerate(lines)
+        ],
+    })
+    return not result.get("duplicate", False)
 
 
 def dm_issue_amounts(card, quantity) -> tuple[float, float, float, float]:
@@ -2242,10 +2337,10 @@ def station_conversion(card, costing, quantity) -> list[dict]:
     return rows
 
 
-def ensure_opening_entry(cur, costing) -> None:
-    """Book opening inventory once: RM at actual, cases and finished goods at standard."""
-    cur.execute("SELECT 1 FROM cost_entries WHERE event_ref = 'OPENING-BAL'")
-    if cur.fetchone():
+def ensure_opening_entry(cur, costing, posted) -> None:
+    """Book opening inventory once: RM at actual, cases and finished goods at
+    standard. `posted` is the GL's set of already-posted refs (idempotency)."""
+    if "OPENING-BAL" in posted:
         return
     cur.execute(
         "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
@@ -2284,17 +2379,11 @@ def sync_costing(cur, states) -> tuple[dict | None, dict]:
     costing = load_costing(cur)
     if costing is None:
         return None, {}
-    ensure_opening_entry(cur, costing)
+    # Idempotency now comes from the GL (the ledger): which refs are already posted.
+    posted = gl_backed.posted_refs(1)
+    ensure_opening_entry(cur, costing, posted)
 
     cards = {}
-    order_ids = [state["order"]["id"] for state in states if state["order"]["id"] and state["order"]["id"] > 0]
-    posted = set()
-    if order_ids:
-        cur.execute(
-            "SELECT event_ref FROM cost_entries WHERE production_order_id = ANY(%s)", (order_ids,)
-        )
-        posted = {row["event_ref"] for row in cur.fetchall()}
-
     for state in states:
         order = state["order"]
         if not order["id"] or order["id"] < 0 or order["production_status"] == "queued":
@@ -2394,17 +2483,9 @@ def post_completion_costing(cur, order, costing, card) -> None:
     wip_std, rm_actual, sub_std, ppv = dm_issue_amounts(card, quantity)
     # Transfer exactly what was absorbed into WIP for this order (the posted
     # ledger, not a recomputed card), so WIP zeroes to the penny even if a
-    # standard was edited while the order was in flight.
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0) AS wip_balance
-        FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        WHERE e.production_order_id = %s AND l.account_no = %s
-        """,
-        (order["id"], WIP_ACCOUNT),
-    )
-    posted_wip = round(float(cur.fetchone()["wip_balance"]), 2)
+    # standard was edited while the order was in flight. Read from the GL by the
+    # order's document reference (its order_no).
+    posted_wip = gl_backed.reference_net(1, order["order_no"], WIP_ACCOUNT)
     if posted_wip <= 0:
         posted_wip = round(wip_std + dl_applied + oh_applied, 2)
     # Stock always enters at the CURRENT standard; any difference against what
