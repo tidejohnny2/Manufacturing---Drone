@@ -2882,6 +2882,65 @@ def fetch_cost_ledger(
     return {"entries": entries, "has_more": has_more, "total": total, "event_types": event_types}
 
 
+TB_NOTE = (
+    "Raw Materials GL reflects standard-costing issues; physical buy-part "
+    "bins are not decremented in this demo, so RM has no physical tie-out."
+)
+
+
+def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, float]:
+    """The plant-floor figures the physical tie-out controls compare the ledger
+    against: expected WIP absorption, case/FG stock at standard, and the
+    received-PO total. Independent of which ledger holds the balances, so both
+    the local and GL-backed trial balances use it."""
+    cards = {
+        "DRN-FG-600": cost_card(cur, costing, "DRN-FG-600"),
+        "CASE-FG-500": cost_card(cur, costing, "CASE-FG-500"),
+    }
+    expected_wip = 0.0
+    case_in_transit = 0.0
+    for state in states:
+        order = state["order"]
+        if order["production_status"] in ("complete", "queued"):
+            continue
+        card = cards.setdefault(
+            order["finished_good"], cost_card(cur, costing, order["finished_good"])
+        )
+        quantity = order["quantity"]
+        completed_zones = {
+            row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
+        }
+        conv_done = sum(
+            row["dl"] + row["oh"]
+            for row in station_conversion(card, costing, quantity)
+            if row["zone_id"] in completed_zones
+        )
+        expected_wip = round(expected_wip + round(card["dm_std"] * quantity, 2) + conv_done, 2)
+        if order["finished_good"] == "DRN-FG-600":
+            case_line = next((line for line in card["dm_lines"] if line["source"] == "make"), None)
+            if case_line:
+                case_in_transit = round(case_in_transit + case_line["ext_std"] * quantity, 2)
+
+    cur.execute(
+        "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+    )
+    stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
+    case_expected = round(
+        stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
+    )
+    fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
+        FROM purchase_order_lines l
+        JOIN purchase_orders p ON p.id = l.purchase_order_id
+        WHERE p.status = 'received' AND p.company_id = 1
+        """
+    )
+    received_total = round(float(cur.fetchone()["total"]), 2)
+    return expected_wip, case_expected, fg_expected, received_total
+
+
 def fetch_trial_balance(company_id=1) -> dict:
     """Trial balance plus the control checks: balanced books, balanced
     entries, GL-to-operations ties, and ledger immutability. Scoped to a
@@ -2915,54 +2974,9 @@ def fetch_trial_balance(company_id=1) -> dict:
 
             expected_wip = case_expected = fg_expected = received_total = 0.0
             if is_plant:
-                cards = {
-                    "DRN-FG-600": cost_card(cur, costing, "DRN-FG-600"),
-                    "CASE-FG-500": cost_card(cur, costing, "CASE-FG-500"),
-                }
-                # Expected WIP: what the posting rules should have absorbed so far.
-                case_in_transit = 0.0
-                for state in states:
-                    order = state["order"]
-                    if order["production_status"] in ("complete", "queued"):
-                        continue
-                    card = cards.setdefault(
-                        order["finished_good"], cost_card(cur, costing, order["finished_good"])
-                    )
-                    quantity = order["quantity"]
-                    completed_zones = {
-                        row["zone_id"] for row in state["balances"] if row["completed_quantity"] > 0
-                    }
-                    conv_done = sum(
-                        row["dl"] + row["oh"]
-                        for row in station_conversion(card, costing, quantity)
-                        if row["zone_id"] in completed_zones
-                    )
-                    expected_wip = round(expected_wip + round(card["dm_std"] * quantity, 2) + conv_done, 2)
-                    if order["finished_good"] == "DRN-FG-600":
-                        case_line = next(
-                            (line for line in card["dm_lines"] if line["source"] == "make"), None
-                        )
-                        if case_line:
-                            case_in_transit = round(case_in_transit + case_line["ext_std"] * quantity, 2)
-
-                cur.execute(
-                    "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
+                expected_wip, case_expected, fg_expected, received_total = _plant_expected_values(
+                    cur, states, costing
                 )
-                stock = {row["part_number"]: float(row["on_hand"]) for row in cur.fetchall()}
-                case_expected = round(
-                    stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
-                )
-                fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
-                    FROM purchase_order_lines l
-                    JOIN purchase_orders p ON p.id = l.purchase_order_id
-                    WHERE p.status = 'received' AND p.company_id = %s
-                    """,
-                    (company_id,),
-                )
-                received_total = round(float(cur.fetchone()["total"]), 2)
 
             cur.execute(
                 "SELECT tgname FROM pg_trigger WHERE tgname IN ('cost_entries_immutable', 'cost_lines_immutable')"
@@ -3020,11 +3034,61 @@ def fetch_trial_balance(company_id=1) -> dict:
         "total_debit": total_debit,
         "total_credit": total_credit,
         "controls": controls,
-        "note": (
-            "Raw Materials GL reflects standard-costing issues; physical buy-part "
-            "bins are not decremented in this demo, so RM has no physical tie-out."
-        ),
+        "note": TB_NOTE,
     }
+
+
+def gl_trial_balance(company_id) -> dict:
+    """The GL-backed trial balance (Phase 3b). Books and the three generic
+    controls come from the onadapt-gl service; the four plant physical tie-outs
+    are re-computed here against the GL's balances. New local postings are pushed
+    to the GL first (inline sync) so its balances are current — otherwise the
+    ties would flap while the sim runs ahead of the mirror."""
+    is_plant = company_id == 1
+    expected = (0.0, 0.0, 0.0, 0.0)
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            states = run_simulation_sync(cur) if is_plant else []
+            conn.commit()
+            costing = load_costing(cur)
+            if costing is None:
+                raise ValueError("Costing tables are not installed yet.")
+            if is_plant:
+                expected = _plant_expected_values(cur, states, costing)
+
+    gl_backed.sync_gl_now()  # make the GL fresh before reading its balances
+    gl = gl_backed.gl_get(f"/v1/trial-balance?company={company_id}")
+    balances = gl["accounts"]
+    total_debit = float(gl["total_debit"])
+    total_credit = float(gl["total_credit"])
+    generic = {c["name"]: c for c in gl.get("controls", [])}
+
+    def control(name, ok, detail):
+        return {"name": name, "ok": bool(ok), "detail": detail}
+
+    expected_wip, case_expected, fg_expected, received_total = expected
+    wip_gl = gl_balance(balances, WIP_ACCOUNT)
+    case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
+    fg_gl = gl_balance(balances, FG_ACCOUNT)
+    ap_gl = gl_balance(balances, AP_ACCOUNT)
+    entries = generic.get("Every journal entry balances", {})
+    immutable = generic.get("Ledger immutability enforced", {})
+    controls = [
+        control("Trial balance in balance", abs(total_debit - total_credit) <= 0.01,
+                f"Total DR {total_debit:,.2f} vs CR {total_credit:,.2f}"),
+        control("Every journal entry balances", entries.get("ok", True), entries.get("detail", "")),
+        control("GL WIP ties to shop-floor absorption", abs(wip_gl - expected_wip) <= 1,
+                f"GL {wip_gl:,.2f} vs simulated absorption {expected_wip:,.2f}"),
+        control("Case subassembly GL ties to case stock at standard", abs(case_gl - case_expected) <= 1,
+                f"GL {case_gl:,.2f} vs stock less in-flight pulls {case_expected:,.2f}"),
+        control("Finished goods GL ties to FG stock at standard", abs(fg_gl - fg_expected) <= 1,
+                f"GL {fg_gl:,.2f} vs stock at standard {fg_expected:,.2f}"),
+        control("Cost ledger immutability enforced", immutable.get("ok", False), immutable.get("detail", "")),
+        control("Accounts Payable ties to received vendor POs", abs(ap_gl - received_total) <= 0.01,
+                f"GL {ap_gl:,.2f} vs received PO total {received_total:,.2f}"),
+    ]
+    return {"accounts": balances, "total_debit": total_debit, "total_credit": total_credit,
+            "controls": controls, "note": TB_NOTE}
 
 
 def fetch_analytics(company_id: int = 1, group_name: str | None = None) -> dict:
@@ -6145,7 +6209,13 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                             date_from=date_from, date_to=date_to, company_id=company,
                         )
                 elif path == "/api/costing/trial-balance":
-                    payload = fetch_trial_balance(company)
+                    if gl_backed.enabled():
+                        try:
+                            payload = gl_trial_balance(company)
+                        except Exception:
+                            payload = fetch_trial_balance(company)
+                    else:
+                        payload = fetch_trial_balance(company)
                 elif path == "/api/costing/accounts":
                     payload = fetch_gl_accounts(company)
                 elif path == "/api/sales":
