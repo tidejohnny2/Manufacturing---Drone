@@ -4887,6 +4887,14 @@ def intake_worker() -> None:
                 last_poll=datetime.now(timezone.utc).isoformat(),
                 last_error=_mailbox_error_text(exc),
             )
+        # Propagate any headless postings (sim advance, backorders) to the GL as
+        # journal entries, so the shared books stay current without a page open.
+        try:
+            if gl_backed.enabled():
+                refresh_source_tags(1)
+                gl_backed.push_best_effort()
+        except Exception:
+            pass
         time.sleep(INTAKE_POLL_SECONDS)
 
 
@@ -6172,6 +6180,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     if gl_backed.enabled():
                         try:
                             refresh_source_tags(company)
+                            gl_backed.push_best_effort()
                             payload = gl_backed.analytics(company, group_name)
                         except Exception:
                             payload = fetch_analytics(company, group_name)
@@ -6194,6 +6203,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                     if gl_backed.enabled():
                         try:
                             refresh_source_tags(company)
+                            gl_backed.push_best_effort()
                             payload = gl_backed.ledger(
                                 company, order_no=order_no, limit=limit, before_id=before_id,
                                 event_type=event_type, date_from=date_from, date_to=date_to,

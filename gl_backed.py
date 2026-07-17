@@ -1,10 +1,11 @@
-"""GL-backed reads (Phase 3).
+"""GL-backed reads + writes (Phase 3-4).
 
-When GL_READS is on, the accounting reporting pages are served from the shared
-onadapt-gl service over its /v1 API instead of the local ledger. Every call
-falls back to the local function on any error, so a GL hiccup never breaks a
-page. Writes still go to the local ledger; the mirror timer
-(onadapt-gl-mirror) keeps the GL current within ~60s.
+When GL_READS is on, the accounting pages are SERVED from the shared onadapt-gl
+service over its /v1 API (with local fallback on any error), and every local
+ledger write is POSTED to the GL as a real journal entry via
+POST /v1/journal-entries. Manufacturing is a proper API client of the GL — it
+posts journals, it does not copy rows into the GL's database. The local ledger
+stays as the reconcilable safety net; the GL-side mirror timer only reconciles.
 
 Config comes from the environment (set in drones.env):
     GL_BASE_URL   e.g. http://127.0.0.1:8798
@@ -13,72 +14,102 @@ Config comes from the environment (set in drones.env):
 """
 import json
 import os
-import subprocess
 import urllib.request
 from urllib.parse import quote
+
+import psycopg
+from psycopg.rows import dict_row
 
 GL_BASE_URL = os.environ.get("GL_BASE_URL", "").rstrip("/")
 GL_API_KEY = os.environ.get("GL_API_KEY", "")
 GL_READS = os.environ.get("GL_READS", "0") == "1"
-
-# Inline read-time sync (Phase 3b): push new local postings into the GL right
-# before a GL-backed read so its balances are current. Reuses the onadapt-gl
-# mirror in --push-only mode.
-GL_DATABASE_URL = os.environ.get("GL_DATABASE_URL", "")
 LOCAL_DATABASE_URL = os.environ.get("DATABASE_URL", "")
-GL_MIRROR_PYTHON = os.environ.get("GL_MIRROR_PYTHON", "/opt/onadapt-gl/venv/bin/python")
-GL_MIRROR_SCRIPT = os.environ.get("GL_MIRROR_SCRIPT", "/opt/onadapt-gl/mirror.py")
 
 
 def enabled() -> bool:
     return GL_READS and bool(GL_BASE_URL) and bool(GL_API_KEY)
 
 
-def _configured() -> bool:
-    return bool(GL_DATABASE_URL and LOCAL_DATABASE_URL and os.path.exists(GL_MIRROR_SCRIPT))
-
-
-def _run_mirror(*args) -> None:
-    """Run the onadapt-gl mirror with the given flags. Raises on failure."""
-    if not _configured():
-        raise RuntimeError("GL sync is not configured")
-    env = dict(os.environ)
-    env["SOURCE_DATABASE_URL"] = LOCAL_DATABASE_URL
-    env["DATABASE_URL"] = GL_DATABASE_URL
-    subprocess.run(
-        [GL_MIRROR_PYTHON, GL_MIRROR_SCRIPT, *args],
-        env=env, timeout=25, capture_output=True, check=True,
+def gl_post(path: str, body: dict) -> dict:
+    req = urllib.request.Request(
+        GL_BASE_URL + path, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {GL_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
     )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        result = json.load(resp)
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    return result
+
+
+def post_pending() -> None:
+    """Post every local ledger entry the GL doesn't yet hold as a real balanced
+    journal entry via POST /v1/journal-entries (idempotent by ref, so retries
+    and overlaps are safe). This is how Manufacturing writes to the GL. The
+    analytic tag overlay is a separate report-only layer synced by the GL-side
+    mirror, not part of the journal, so it isn't posted here. Raises on failure
+    so read-time callers fall back to the local ledger; the write path uses
+    push_best_effort() which swallows."""
+    if not enabled() or not LOCAL_DATABASE_URL:
+        return
+    with psycopg.connect(LOCAL_DATABASE_URL, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT company_id FROM cost_entries")
+            for cid in sorted(r["company_id"] for r in cur.fetchall()):
+                have = set(gl_get(f"/v1/journal-entries/refs?company={cid}").get("refs", []))
+                cur.execute(
+                    "SELECT id, event_ref, event_type, order_no, memo FROM cost_entries "
+                    "WHERE company_id = %s ORDER BY id",
+                    (cid,),
+                )
+                pending = [e for e in cur.fetchall() if e["event_ref"] not in have]
+                for entry in pending:
+                    cur.execute(
+                        "SELECT account_no, debit, credit FROM cost_lines "
+                        "WHERE entry_id = %s ORDER BY id",
+                        (entry["id"],),
+                    )
+                    lines = [
+                        {"account": l["account_no"], "debit": float(l["debit"]), "credit": float(l["credit"])}
+                        for l in cur.fetchall()
+                    ]
+                    gl_post("/v1/journal-entries", {
+                        "company": cid, "ref": entry["event_ref"], "type": entry["event_type"],
+                        "reference": entry["order_no"], "memo": entry["memo"],
+                        "source": "manufacturing", "lines": lines,
+                    })
 
 
 def sync_gl_now() -> None:
-    """Push new local postings into the GL now so a GL-backed read is fresh.
-    Raises on failure so the caller falls back to the local ledger rather than
-    reporting controls against a stale GL."""
-    _run_mirror("--push-only")
+    """Post pending local entries to the GL now so a GL-backed read is fresh.
+    Raises on failure so the caller falls back to the local ledger."""
+    post_pending()
 
 
 def push_best_effort() -> None:
-    """Dual-write: after a local ledger write, mirror it into the GL right away
-    so the GL-backed pages are current. Never raises — the local write already
-    succeeded and the mirror timer is the backstop. Only runs when reads are on
-    the GL (otherwise the timer keeps the shadow current)."""
+    """Dual-write: after a local ledger write, post it to the GL right away.
+    Never raises — the local write already succeeded and the next read/worker
+    cycle catches up. Only runs when reads are on the GL."""
     if not enabled():
         return
     try:
-        _run_mirror("--push-only")
+        post_pending()
     except Exception:
         pass
 
 
 def reset_gl() -> None:
-    """Reflect a dev-mode local purge in the GL (clear the tenant + re-mirror).
-    Runs whenever the GL is configured — a purge can't be mirrored by inserts,
-    so this must propagate even when reads are still local. Best-effort."""
-    if not _configured():
+    """Reflect a dev-mode local purge in the GL: clear the tenant's journal via
+    POST /v1/reset (chart/companies persist), then re-post the fresh source. A
+    purge can't be conveyed by posting, so the clear goes whenever the GL is
+    configured. Best-effort."""
+    if not (GL_BASE_URL and GL_API_KEY):
         return
     try:
-        _run_mirror("--reset")
+        gl_post("/v1/reset", {})
+        if enabled():
+            post_pending()
     except Exception:
         pass
 
