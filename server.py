@@ -2611,6 +2611,99 @@ def _ledger_date(value: str | None, label: str) -> str | None:
     return value
 
 
+def apply_auto_tags(cur, company_id: int = 1) -> None:
+    """Auto-tag cost lines from engine ground-truth — the plant already knows
+    each entry's product, cost center, customer, and vendor. Report-only:
+    writes only tag_distributions, never the immutable ledger. Idempotent
+    (only fills lines not yet tagged in a group), so it backfills history and
+    stays current. Keeps Customer/Vendor tags in sync with the subledgers."""
+    # Ensure a tag exists for every customer/vendor (new ones since seed).
+    cur.execute(
+        """
+        INSERT INTO account_tags (company_id, tag_group_id, name, reference)
+        SELECT c.company_id, g.id, c.name, c.account_code
+        FROM customers c JOIN tag_groups g ON g.company_id = c.company_id AND g.name = 'Customer'
+        WHERE c.company_id = %s AND c.account_code IS NOT NULL
+        ON CONFLICT DO NOTHING
+        """,
+        (company_id,),
+    )
+    cur.execute(
+        """
+        INSERT INTO account_tags (company_id, tag_group_id, name, reference)
+        SELECT v.company_id, g.id, v.name, v.account_code
+        FROM vendors v JOIN tag_groups g ON g.company_id = v.company_id AND g.name = 'Vendor'
+        WHERE v.company_id = %s AND v.account_code IS NOT NULL
+        ON CONFLICT DO NOTHING
+        """,
+        (company_id,),
+    )
+    # Each rule inserts a 100% distribution for lines not yet tagged in the group.
+    untagged = (
+        "NOT EXISTS (SELECT 1 FROM tag_distributions d JOIN account_tags at2 ON at2.id = d.account_tag_id "
+        "WHERE d.cost_line_id = l.id AND at2.tag_group_id = g.id)"
+    )
+    rules = [
+        # Product Line from the production order's finished good.
+        """
+        SELECT l.id, t.id FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        JOIN production_orders po ON po.id = e.production_order_id
+        JOIN materials m ON m.id = po.finished_material_id
+        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Product Line'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = m.sku
+        WHERE e.company_id = %s AND {u}
+        """,
+        # Product Line from the account (COGS/subassembly/FG lines, no production order).
+        """
+        SELECT l.id, t.id FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Product Line'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference =
+             CASE WHEN l.account_no = '1330' THEN 'DRN-FG-600'
+                  WHEN l.account_no = '1315' THEN 'CASE-FG-500' END
+        WHERE e.company_id = %s AND l.account_no IN ('1330', '1315') AND {u}
+        """,
+        # Cost Center from the order-number prefix.
+        """
+        SELECT l.id, t.id FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Cost Center'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.name =
+             CASE WHEN e.order_no LIKE 'DRN-PO%%' THEN 'Assembly Line'
+                  WHEN e.order_no LIKE 'CASE-PO%%' THEN 'Case Line' END
+        WHERE e.company_id = %s AND (e.order_no LIKE 'DRN-PO%%' OR e.order_no LIKE 'CASE-PO%%') AND {u}
+        """,
+        # Customer from the invoice.
+        """
+        SELECT l.id, t.id FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        JOIN invoices inv ON inv.invoice_no = e.order_no
+        JOIN customers c ON c.id = inv.customer_id
+        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Customer'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = c.account_code
+        WHERE e.company_id = %s AND e.event_type IN ('revenue', 'cogs') AND {u}
+        """,
+        # Vendor from the received PO.
+        """
+        SELECT l.id, t.id FROM cost_lines l
+        JOIN cost_entries e ON e.id = l.entry_id
+        JOIN purchase_orders p ON p.po_no = e.order_no
+        JOIN vendors v ON v.id = p.vendor_id
+        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Vendor'
+        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = v.account_code
+        WHERE e.company_id = %s AND e.event_type = 'po_receipt' AND {u}
+        """,
+    ]
+    for rule in rules:
+        cur.execute(
+            "INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage) "
+            + rule.format(u=untagged)
+            + " AND t.id IS NOT NULL ON CONFLICT DO NOTHING",
+            (company_id,),
+        )
+
+
 def fetch_cost_ledger(
     order_no: str | None,
     limit: int,
@@ -2626,6 +2719,10 @@ def fetch_cost_ledger(
         with conn.cursor() as cur:
             if not costing_ready(cur):
                 raise ValueError("Costing tables are not installed yet.")
+            cur.execute("SELECT to_regclass('tag_distributions') AS reg")
+            if cur.fetchone()["reg"] is not None:
+                apply_auto_tags(cur, company_id)
+                conn.commit()
             clauses: list[str] = ["e.company_id = %s"]
             params: list[object] = [company_id]
             if order_no:
@@ -2669,15 +2766,40 @@ def fetch_cost_ledger(
             if entry_ids:
                 cur.execute(
                     """
-                    SELECT l.entry_id, l.account_no, a.name AS account_name, l.debit, l.credit
+                    SELECT l.id, l.entry_id, l.account_no, a.name AS account_name, l.debit, l.credit
                     FROM cost_lines l
-                    JOIN gl_accounts a ON a.account_no = l.account_no
+                    JOIN gl_accounts a ON a.account_no = l.account_no AND a.company_id = l.company_id
                     WHERE l.entry_id = ANY(%s)
                     ORDER BY l.id
                     """,
                     (entry_ids,),
                 )
-                for line in cur.fetchall():
+                lines = cur.fetchall()
+                # Attach analytic tags to each line (report-only overlay).
+                tags_by_line: dict[int, list] = {}
+                line_ids = [row["id"] for row in lines]
+                if line_ids:
+                    cur.execute(
+                        """
+                        SELECT d.cost_line_id, g.name AS group_name, g.color, t.name AS tag_name,
+                               d.percentage
+                        FROM tag_distributions d
+                        JOIN account_tags t ON t.id = d.account_tag_id
+                        JOIN tag_groups g ON g.id = t.tag_group_id
+                        WHERE d.cost_line_id = ANY(%s)
+                        ORDER BY g.id, t.name
+                        """,
+                        (line_ids,),
+                    )
+                    for tag in cur.fetchall():
+                        tags_by_line.setdefault(tag["cost_line_id"], []).append({
+                            "group": tag["group_name"],
+                            "color": tag["color"],
+                            "name": tag["tag_name"],
+                            "percentage": float(tag["percentage"]),
+                        })
+                for line in lines:
+                    line["tags"] = tags_by_line.get(line["id"], [])
                     lines_by_entry.setdefault(line["entry_id"], []).append(line)
             for entry in entries:
                 entry["lines"] = lines_by_entry.get(entry["id"], [])
@@ -2832,6 +2954,78 @@ def fetch_trial_balance(company_id=1) -> dict:
             "bins are not decremented in this demo, so RM has no physical tie-out."
         ),
     }
+
+
+def fetch_analytics(company_id: int = 1, group_name: str | None = None) -> dict:
+    """Analytic report: the books sliced by a chosen dimension. Per tag it
+    shows allocated debits/credits and net, plus a revenue/COGS/margin cut
+    (accounts 4000/5010) that lights up for the Product Line and Customer
+    dimensions. Report-only — reads tag_distributions, never the TB path."""
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('tag_groups') AS reg")
+            if cur.fetchone()["reg"] is None:
+                return {"groups": [], "group": None, "rows": [], "totals": {}}
+            apply_auto_tags(cur, company_id)
+            conn.commit()
+            cur.execute(
+                "SELECT id, name, color FROM tag_groups WHERE company_id = %s ORDER BY id",
+                (company_id,),
+            )
+            groups = cur.fetchall()
+            if not groups:
+                return {"groups": [], "group": None, "rows": [], "totals": {}}
+            chosen = next((g for g in groups if g["name"] == group_name), groups[0])
+
+            cur.execute(
+                """
+                SELECT t.name, t.reference,
+                       COALESCE(SUM(l.debit * d.percentage / 100), 0) AS alloc_debit,
+                       COALESCE(SUM(l.credit * d.percentage / 100), 0) AS alloc_credit,
+                       COALESCE(SUM(CASE WHEN l.account_no = '4000' THEN l.credit * d.percentage / 100 ELSE 0 END), 0) AS revenue,
+                       COALESCE(SUM(CASE WHEN l.account_no = '5010' THEN l.debit * d.percentage / 100 ELSE 0 END), 0) AS cogs,
+                       COUNT(DISTINCT l.id) AS lines
+                FROM account_tags t
+                LEFT JOIN tag_distributions d ON d.account_tag_id = t.id
+                LEFT JOIN cost_lines l ON l.id = d.cost_line_id AND l.company_id = t.company_id
+                WHERE t.tag_group_id = %s
+                GROUP BY t.id, t.name, t.reference
+                HAVING COUNT(DISTINCT l.id) > 0
+                ORDER BY t.name
+                """,
+                (chosen["id"],),
+            )
+            rows = []
+            tot = {"alloc_debit": 0.0, "alloc_credit": 0.0, "revenue": 0.0, "cogs": 0.0}
+            for row in cur.fetchall():
+                dr = round(float(row["alloc_debit"]), 2)
+                cr = round(float(row["alloc_credit"]), 2)
+                rev = round(float(row["revenue"]), 2)
+                cogs = round(float(row["cogs"]), 2)
+                rows.append({
+                    "name": row["name"],
+                    "reference": row["reference"],
+                    "alloc_debit": dr,
+                    "alloc_credit": cr,
+                    "net": round(dr - cr, 2),
+                    "revenue": rev,
+                    "cogs": cogs,
+                    "margin": round(rev - cogs, 2),
+                    "lines": row["lines"],
+                })
+                tot["alloc_debit"] += dr
+                tot["alloc_credit"] += cr
+                tot["revenue"] += rev
+                tot["cogs"] += cogs
+            totals = {
+                "alloc_debit": round(tot["alloc_debit"], 2),
+                "alloc_credit": round(tot["alloc_credit"], 2),
+                "net": round(tot["alloc_debit"] - tot["alloc_credit"], 2),
+                "revenue": round(tot["revenue"], 2),
+                "cogs": round(tot["cogs"], 2),
+                "margin": round(tot["revenue"] - tot["cogs"], 2),
+            }
+    return {"groups": groups, "group": chosen["name"], "rows": rows, "totals": totals}
 
 
 def fetch_costing_standards() -> dict:
@@ -5727,6 +5921,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/costing/standards",
             "/api/costing/accounts",
             "/api/companies",
+            "/api/analytics",
             "/api/sales",
             "/api/purchasing",
             "/api/intake",
@@ -5738,6 +5933,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 company = int(query.get("company", ["1"])[0] or 1)
                 if path == "/api/companies":
                     payload = fetch_companies()
+                elif path == "/api/analytics":
+                    payload = fetch_analytics(company, query.get("group", [None])[0])
                 elif path == "/api/costing/cost-cards":
                     payload = fetch_cost_cards()
                 elif path == "/api/costing/wip":

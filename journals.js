@@ -32,6 +32,24 @@ function journalTypeLabel(value) {
   return JOURNAL_TYPE_LABELS[value] ?? titleCase(value);
 }
 
+// Analytic tag chips on a journal line (report-only overlay).
+function tagChips(tags) {
+  if (!tags || !tags.length) {
+    return "";
+  }
+  return (
+    " " +
+    tags
+      .map(
+        (t) =>
+          `<span class="an-chip" title="${esc(t.group)}"><span class="an-dot" style="background:${esc(
+            t.color || "#64748b"
+          )}"></span>${esc(t.name)}</span>`
+      )
+      .join(" ")
+  );
+}
+
 function syncJournalTypes(types) {
   const current = journalType.value;
   journalType.innerHTML =
@@ -67,7 +85,7 @@ function renderJournal(data) {
               (line) => `
                 <tr>
                   <td colspan="4"></td>
-                  <td>${esc(line.account_no)} ${esc(line.account_name)}</td>
+                  <td>${esc(line.account_no)} ${esc(line.account_name)}${tagChips(line.tags)}</td>
                   <td>${Number(line.debit) ? money(line.debit) : ""}</td>
                   <td>${Number(line.credit) ? money(line.credit) : ""}</td>
                 </tr>`

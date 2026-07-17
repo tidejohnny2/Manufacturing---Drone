@@ -2157,6 +2157,55 @@ body.view-rework .shipping-route {
   font-weight: 700;
 }
 
+/* Analytic tag chips (journal lines) + dimension tabs (Analytics page). */
+.an-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding: 0 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.an-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.dimension-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dimension-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: var(--oa-accent-ink);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.dimension-tab.active {
+  background: var(--oa-accent);
+  color: var(--oa-accent-fg);
+  border-color: var(--oa-accent);
+}
+
 /* Subledger account codes (C-1001 customers, V-2001 vendors). */
 .acct-code {
   color: #64748b;
