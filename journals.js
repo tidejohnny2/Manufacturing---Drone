@@ -32,6 +32,15 @@ function journalTypeLabel(value) {
   return JOURNAL_TYPE_LABELS[value] ?? titleCase(value);
 }
 
+// Reverse control for a manual entry (non-plant companies only). The ledger
+// is immutable, so a mistake is corrected by posting its mirror.
+function reverseButton(entry) {
+  if (entry.event_type !== "manual" || companyId() === 1) {
+    return "";
+  }
+  return ` <button type="button" class="acct-delete mje-reverse" data-ref="${esc(entry.event_ref)}">Reverse</button>`;
+}
+
 // Analytic tag chips on a journal line (report-only overlay).
 function tagChips(tags) {
   if (!tags || !tags.length) {
@@ -78,7 +87,7 @@ function renderJournal(data) {
               <td>${esc(entry.event_ref)}</td>
               <td>${journalTypeLabel(entry.event_type)}</td>
               <td>${esc(entry.order_no ?? "")}</td>
-              <td colspan="3">${esc(entry.memo)}</td>
+              <td colspan="3">${esc(entry.memo)}${reverseButton(entry)}</td>
             </tr>`;
           const lines = entry.lines
             .map(
@@ -163,6 +172,32 @@ for (const control of [journalFilter, journalType, journalFrom, journalTo]) {
 
 journalOlder.addEventListener("click", () => {
   loadOlderJournal().catch(() => {});
+});
+
+journalBody.addEventListener("click", async (event) => {
+  const button = event.target.closest(".mje-reverse");
+  if (!button) {
+    return;
+  }
+  const ref = button.dataset.ref;
+  if (!window.confirm(`Reverse ${ref}? This posts a mirror entry (the ledger is immutable).`)) {
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/journal-entry/reverse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ companyId: companyId(), eventRef: ref })
+    });
+    const data = await response.json();
+    journalCount.textContent =
+      !response.ok || data.error ? data.error ?? "Reverse failed." : `Reversed ${ref} as ${data.eventRef}.`;
+    await loadJournal();
+  } catch (error) {
+    journalCount.textContent = "Reverse failed.";
+    button.disabled = false;
+  }
 });
 
 document.querySelector("#journalClear").addEventListener("click", () => {

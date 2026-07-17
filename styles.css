@@ -2127,6 +2127,34 @@ body.view-rework .shipping-route {
   font-size: 1.2rem;
 }
 
+/* Manual journal entry (non-plant companies). */
+.mje-memo {
+  display: block;
+  margin: 8px 0 12px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.mje-memo input {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-weight: 400;
+}
+
+.mje-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
 /* Multi-company header switcher (accounting pages). */
 .company-switcher {
   display: inline-flex;

@@ -84,6 +84,17 @@ function renderAccounts(data) {
     newType.innerHTML = accountTypes.map((t) => `<option value="${t}">${t}</option>`).join("");
   }
   document.querySelector("#sumAccounts").textContent = data.accounts.length;
+  // Manual journal entry is available for non-plant companies only.
+  manualAccounts = data.accounts;
+  const section = document.querySelector("#manualEntrySection");
+  if (section) {
+    const canManual = companyId() !== 1 && data.accounts.length > 0;
+    section.hidden = !canManual;
+    if (canManual && !mjeLines.children.length) {
+      addMjeLine();
+      addMjeLine();
+    }
+  }
   accountsBody.innerHTML = data.accounts
     .map((account) => {
       const locked = account.protected || account.posting_count > 0;
@@ -193,6 +204,88 @@ accountsBody.addEventListener("click", async (event) => {
   }
 });
 
+// ===== Manual journal entry (non-plant companies) =====
+let manualAccounts = [];
+const mjeLines = document.querySelector("#mjeLines");
+const mjeMsg = document.querySelector("#mjeMsg");
+
+function addMjeLine() {
+  if (!mjeLines) {
+    return;
+  }
+  const row = document.createElement("tr");
+  const options = manualAccounts
+    .map((a) => `<option value="${esc(a.account_no)}">${esc(a.account_no)} — ${esc(a.name)}</option>`)
+    .join("");
+  row.innerHTML = `
+    <td><select class="acct-input mje-account">${options}</select></td>
+    <td><input class="acct-input mje-debit" type="number" min="0" step="0.01" placeholder="0.00" /></td>
+    <td><input class="acct-input mje-credit" type="number" min="0" step="0.01" placeholder="0.00" /></td>
+    <td><button type="button" class="acct-delete mje-remove" aria-label="Remove line">&times;</button></td>`;
+  mjeLines.appendChild(row);
+}
+
+function mjeReadLines() {
+  return [...mjeLines.querySelectorAll("tr")].map((row) => ({
+    accountNo: row.querySelector(".mje-account").value,
+    debit: Number(row.querySelector(".mje-debit").value) || 0,
+    credit: Number(row.querySelector(".mje-credit").value) || 0
+  }));
+}
+
+function updateMjeBalance() {
+  const lines = mjeReadLines();
+  const dr = lines.reduce((s, l) => s + l.debit, 0);
+  const cr = lines.reduce((s, l) => s + l.credit, 0);
+  const balanced = Math.abs(dr - cr) < 0.005 && dr > 0;
+  const node = document.querySelector("#mjeBalance");
+  node.textContent = `DR ${money(dr)} · CR ${money(cr)} — ${balanced ? "balanced" : "out of balance"}`;
+  node.className = `kit-verdict ${balanced ? "kit-release" : "kit-hold"}`;
+}
+
+if (mjeLines) {
+  document.querySelector("#mjeAddLine").addEventListener("click", addMjeLine);
+  mjeLines.addEventListener("input", updateMjeBalance);
+  mjeLines.addEventListener("click", (event) => {
+    if (event.target.closest(".mje-remove")) {
+      event.target.closest("tr").remove();
+      updateMjeBalance();
+    }
+  });
+  document.querySelector("#mjePost").addEventListener("click", async () => {
+    mjeMsg.textContent = "Posting…";
+    mjeMsg.className = "kit-verdict";
+    try {
+      const response = await fetch("/api/journal-entry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyId: companyId(),
+          memo: document.querySelector("#mjeMemo").value.trim(),
+          lines: mjeReadLines().filter((l) => l.debit > 0 || l.credit > 0)
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || data.error) {
+        mjeMsg.textContent = data.error ?? "Post failed.";
+        mjeMsg.classList.add("kit-hold");
+        return;
+      }
+      mjeMsg.textContent = `Posted ${data.eventRef} (${money(data.totalDebit)}).`;
+      mjeMsg.classList.add("kit-release");
+      document.querySelector("#mjeMemo").value = "";
+      mjeLines.innerHTML = "";
+      addMjeLine();
+      addMjeLine();
+      updateMjeBalance();
+      await loadAll();
+    } catch (error) {
+      mjeMsg.textContent = "Post failed.";
+      mjeMsg.classList.add("kit-hold");
+    }
+  });
+}
+
 async function loadLive() {
   renderTrialBalance(await getJson("/api/costing/trial-balance"));
 }
@@ -212,4 +305,4 @@ if (window.location.protocol !== "file:") {
 }
 
 // Exposed for DOM-level testing.
-window.__accounting = { renderTrialBalance, renderAccounts };
+window.__accounting = { renderTrialBalance, renderAccounts, addMjeLine };

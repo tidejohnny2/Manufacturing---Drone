@@ -80,6 +80,34 @@
         </div>
       </section>
 
+      <section class="plan-band" id="manualEntrySection" aria-label="Manual journal entry" hidden>
+        <div class="kit-head">
+          <h2>New Journal Entry</h2>
+          <span id="mjeBalance" class="kit-verdict"></span>
+        </div>
+        <p class="kit-note">
+          Manual double-entry for this company's books (the Manufacturing Plant is engine-posted, so
+          this is available only for other companies). Debits must equal credits; posted entries are
+          immutable — correct a mistake with the Reverse button on the Journals page.
+        </p>
+        <label class="mje-memo">Memo
+          <input id="mjeMemo" type="text" maxlength="200" placeholder="e.g. Owner cash contribution" />
+        </label>
+        <div class="bom-table-wrap">
+          <table class="bom-table">
+            <thead>
+              <tr><th>Account</th><th>Debit</th><th>Credit</th><th></th></tr>
+            </thead>
+            <tbody id="mjeLines"></tbody>
+          </table>
+        </div>
+        <div class="mje-actions">
+          <button type="button" id="mjeAddLine" class="fill-to-max">Add Line</button>
+          <button type="button" id="mjePost" class="std-save">Post Entry</button>
+          <span id="mjeMsg" class="kit-verdict"></span>
+        </div>
+      </section>
+
       <section class="plan-band" aria-label="Chart of accounts maintenance">
         <div class="kit-head">
           <h2>Chart of Accounts (Maintenance)</h2>

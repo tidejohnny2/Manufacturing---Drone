@@ -3367,6 +3367,105 @@ def manage_gl_account(payload: dict) -> dict:
     return {"action": action, "accountNo": account_no, "actor": actor}
 
 
+def create_manual_entry(payload: dict) -> dict:
+    """Post a balanced manual journal entry to a NON-PLANT company's books.
+    The plant (company 1) is engine-posted only, so manual entries are
+    rejected for it — that keeps its tie-out controls intact. Posts to the
+    same immutable ledger; corrections are made by reversal, not edits."""
+    company_id = int(payload.get("companyId", 0) or 0)
+    if company_id == 1:
+        raise ValueError(
+            "The Manufacturing Plant's books are engine-posted; manual entries "
+            "are only for other companies (switch companies first)."
+        )
+    memo = str(payload.get("memo", "")).strip()
+    if not memo or len(memo) > 200:
+        raise ValueError("A memo is required (max 200 chars).")
+
+    lines = []
+    for raw in payload.get("lines") or []:
+        acct = str(raw.get("accountNo", "")).strip()
+        if not acct:
+            continue
+        debit = round(float(raw.get("debit") or 0), 2)
+        credit = round(float(raw.get("credit") or 0), 2)
+        if debit < 0 or credit < 0:
+            raise ValueError("Amounts cannot be negative.")
+        if (debit > 0) == (credit > 0):
+            raise ValueError(f"Each line is either a debit or a credit — check account {acct}.")
+        lines.append((acct, debit, credit))
+    if len(lines) < 2:
+        raise ValueError("A journal entry needs at least two lines.")
+    total_debit = round(sum(d for _, d, _ in lines), 2)
+    total_credit = round(sum(c for _, _, c in lines), 2)
+    if total_debit <= 0:
+        raise ValueError("Entry total must be greater than zero.")
+    if abs(total_debit - total_credit) > 0.005:
+        raise ValueError(f"Out of balance: debits {total_debit:,.2f} vs credits {total_credit:,.2f}.")
+
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM companies WHERE id = %s", (company_id,))
+            company = cur.fetchone()
+            if not company:
+                raise ValueError("Unknown company.")
+            cur.execute("SELECT account_no FROM gl_accounts WHERE company_id = %s", (company_id,))
+            valid = {row["account_no"] for row in cur.fetchall()}
+            for acct, _, _ in lines:
+                if acct not in valid:
+                    raise ValueError(f"Account {acct} is not in this company's chart of accounts.")
+            event_ref = _next_manual_ref(cur, company_id)
+            if not post_cost_entry(cur, event_ref, None, event_ref, "manual", memo, lines, company_id):
+                raise ValueError("Entry could not be posted (duplicate reference).")
+        conn.commit()
+    return {"eventRef": event_ref, "company": company["name"],
+            "totalDebit": total_debit, "lines": len(lines)}
+
+
+def _next_manual_ref(cur, company_id: int) -> str:
+    cur.execute(
+        """
+        SELECT COALESCE(MAX(substring(event_ref FROM '[0-9]+$')::int), 0) + 1 AS n
+        FROM cost_entries WHERE company_id = %s AND event_ref LIKE %s
+        """,
+        (company_id, f"MJE-{company_id}-%"),
+    )
+    return f"MJE-{company_id}-{cur.fetchone()['n']}"
+
+
+def reverse_manual_entry(payload: dict) -> dict:
+    """Reverse a manual entry by posting its mirror (debits/credits swapped).
+    The ledger is immutable, so this is how a mistake is corrected."""
+    company_id = int(payload.get("companyId", 0) or 0)
+    event_ref = str(payload.get("eventRef", "")).strip()
+    if company_id == 1:
+        raise ValueError("The plant's books are engine-posted; nothing to reverse here.")
+    if not event_ref.startswith("MJE-"):
+        raise ValueError("Only manual journal entries can be reversed.")
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, memo FROM cost_entries WHERE event_ref = %s AND company_id = %s",
+                (event_ref, company_id),
+            )
+            original = cur.fetchone()
+            if not original:
+                raise ValueError(f"Unknown entry {event_ref}.")
+            cur.execute(
+                "SELECT account_no, debit, credit FROM cost_lines WHERE entry_id = %s ORDER BY id",
+                (original["id"],),
+            )
+            # Swap debit and credit on every line.
+            lines = [(r["account_no"], float(r["credit"]), float(r["debit"])) for r in cur.fetchall()]
+            new_ref = _next_manual_ref(cur, company_id)
+            post_cost_entry(
+                cur, new_ref, None, new_ref, "manual_reversal",
+                f"Reversal of {event_ref}: {original['memo']}", lines, company_id,
+            )
+        conn.commit()
+    return {"eventRef": new_ref, "reversed": event_ref}
+
+
 # ===== Sales: customers, sales orders, ship & invoice =====
 # Order-to-cash on the same books: shipping relieves finished stock at the
 # CURRENT standard (so the stock tie-out controls keep holding) and the
@@ -6069,6 +6168,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/station-signoff",
             "/api/costing/standards",
             "/api/costing/accounts",
+            "/api/journal-entry",
+            "/api/journal-entry/reverse",
             "/api/sales/customer",
             "/api/sales/order",
             "/api/sales/invoice",
@@ -6118,6 +6219,12 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/costing/accounts":
                 json_response(self, HTTPStatus.OK, manage_gl_account(payload))
+                return
+            if path == "/api/journal-entry":
+                json_response(self, HTTPStatus.OK, create_manual_entry(payload))
+                return
+            if path == "/api/journal-entry/reverse":
+                json_response(self, HTTPStatus.OK, reverse_manual_entry(payload))
                 return
             if path == "/api/sales/customer":
                 json_response(self, HTTPStatus.OK, manage_customer(payload))
