@@ -1,6 +1,6 @@
 // Shared company switcher for the multi-company accounting pages. The active
 // company is stored in localStorage and sent as ?company=N on every scoped
-// API call; changing it reloads the page. Company 1 is the Drone Plant.
+// API call; changing it reloads the page. Company 1 is the Manufacturing Plant.
 const COMPANY_KEY = "drones-company";
 
 function companyId() {
@@ -22,7 +22,7 @@ async function initCompanySwitcher() {
   if (!host || window.location.protocol === "file:") {
     return;
   }
-  let companies = [{ id: 1, name: "Drone Plant" }];
+  let companies = [{ id: 1, name: "Manufacturing Plant" }];
   try {
     const response = await fetch("/api/companies");
     const data = await response.json();

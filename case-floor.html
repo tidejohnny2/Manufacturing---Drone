@@ -151,11 +151,11 @@
             <g class="zone zone-inventory" data-zone="case_inventory" tabindex="0" role="button" aria-label="Case inventory pull stock">
               <rect class="zone-footprint" x="90" y="400" width="170" height="110" rx="6" />
               <text class="box-label" x="175" y="438">Case Inventory</text>
-              <text class="box-subtitle" x="175" y="464">Drone pull stock</text>
+              <text class="box-subtitle" x="175" y="464">Packaging pull stock</text>
               <text class="box-metric" x="175" y="486" data-zone-metric="case_inventory">WIP 0 | Done 0</text>
             </g>
 
-            <text class="rework-label" x="370" y="630">Cases stocked here are pulled by drone packaging</text>
+            <text class="rework-label" x="370" y="630">Cases stocked here are pulled by packaging</text>
           </svg>
         </div>
       </section>
@@ -229,7 +229,7 @@
           },
           cws2: {
             name: "Case WS2: Foam Cutting + Fit",
-            description: "Cuts foam inserts and verifies drone, battery, and accessory cavity fit.",
+            description: "Cuts foam inserts and verifies unit, battery, and accessory cavity fit.",
             area: "1,400 sq ft",
             flow: "Foam Fit to Hardware",
             status: "Templates loaded"
@@ -257,9 +257,9 @@
           },
           case_inventory: {
             name: "Case Inventory",
-            description: "Stores finished drone transport cases as pull stock for drone packaging.",
+            description: "Stores finished transport cases as pull stock for packaging.",
             area: "2,200 sq ft",
-            flow: "Case stock to drone packaging pull",
+            flow: "Case stock to packaging pull",
             status: "Available"
           }
         }

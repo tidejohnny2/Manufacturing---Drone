@@ -30,7 +30,7 @@ function lineRow() {
   row.className = "so-line";
   row.innerHTML = `
     <select class="so-sku">
-      <option value="DRN-FG-600">DRN-FG-600 — Drone</option>
+      <option value="DRN-FG-600">DRN-FG-600 — Finished Unit</option>
       <option value="CASE-FG-500">CASE-FG-500 — Transport Case</option>
     </select>
     <input class="so-qty" type="number" min="1" value="1" aria-label="Quantity" />

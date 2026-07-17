@@ -3169,7 +3169,7 @@ def fetch_companies() -> dict:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('companies') AS reg")
             if cur.fetchone()["reg"] is None:
-                return {"companies": [{"id": 1, "name": "Drone Plant", "code": "PLANT"}]}
+                return {"companies": [{"id": 1, "name": "Manufacturing Plant", "code": "PLANT"}]}
             cur.execute(
                 "SELECT id, name, code FROM companies WHERE active ORDER BY id"
             )

@@ -26,13 +26,13 @@ let selectedOrderNo = new URLSearchParams(window.location.search).get("order");
 
 const balanceNotes = {
   "Receiving": "Testing start point: initial order balance can sit here before Kitting release.",
-  "Drone Component Kitting": "Production order starts here and waits for material issue.",
+  "Component Kitting": "Production order starts here and waits for material issue.",
   "Workstation 1: Airframe + Motors": "Receives WIP after kitted material is released to assembly.",
   "Workstation 2: Electronics + Power": "Receives WIP after airframe completion and electrical kit issue.",
   "Workstation 3: Firmware + Calibration": "Receives WIP after electronics integration passes gate.",
   "Workstation 4: Motor/ESC Test + Props": "Receives WIP after firmware and calibration are recorded.",
   "Workstation 5: Final QA + Flight Test": "Receives WIP after motor test and prop install pass.",
-  "Finished Goods: Packaged Drones": "Receives accepted unit from QA for carton, label, and documents.",
+  "Finished Goods: Packaged Units": "Receives accepted unit from QA for carton, label, and documents.",
   "FG Inventory": "Completed quantity increases when packaged unit is scanned into stock.",
   "Case Receiving": "Case material receipt point: order balance waits here for staging release.",
   "Case Material Staging": "Stages molded shells, foam blocks, and hardware kits for the case order.",

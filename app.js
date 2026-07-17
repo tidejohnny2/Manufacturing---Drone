@@ -6,13 +6,13 @@ const zones = floorConfig.zones ?? {
   receiving: {
     name: "Receiving",
     description:
-      "Receives supplier deliveries, verifies incoming drone components, and releases accepted parts into kitting.",
+      "Receives supplier deliveries, verifies incoming components, and releases accepted parts into kitting.",
     area: "1,800 sq ft",
     flow: "Receiving to Kitting",
     status: "Open"
   },
   raw: {
-    name: "Drone Component Kitting",
+    name: "Component Kitting",
     description:
       "Receives and stages frames, motors, ESCs, flight controllers, batteries, sensors, propellers, fasteners, and packaging.",
     area: "12,500 sq ft",
@@ -22,7 +22,7 @@ const zones = floorConfig.zones ?? {
   ws1: {
     name: "Workstation 1: Airframe + Motors",
     description:
-      "Builds the drone frame, mounts arms and motors, routes motor wires, and checks frame alignment before tightening.",
+      "Builds the frame, mounts arms and motors, routes motor wires, and checks frame alignment before tightening.",
     area: "3,800 sq ft",
     flow: "Kitting to Electronics",
     status: "Torque verified"
@@ -60,7 +60,7 @@ const zones = floorConfig.zones ?? {
     status: "Flight cage active"
   },
   fg: {
-    name: "Finished Goods: Packaged Drones",
+    name: "Finished Goods: Packaged Units",
     description:
       "Completes final inspection, documentation, and packaging before transfer to finished goods inventory.",
     area: "9,800 sq ft",
@@ -70,7 +70,7 @@ const zones = floorConfig.zones ?? {
   inventory: {
     name: "FG Inventory",
     description:
-      "Stores packaged finished drones as ready stock for allocation, picking, and outbound shipment release.",
+      "Stores packaged finished units as ready stock for allocation, picking, and outbound shipment release.",
     area: "7,500 sq ft",
     flow: "Packaged to FG Inventory",
     status: "Available"
