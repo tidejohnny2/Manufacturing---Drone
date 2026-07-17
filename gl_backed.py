@@ -14,6 +14,7 @@ Config comes from the environment (set in drones.env):
 """
 import json
 import os
+import urllib.error
 import urllib.request
 from urllib.parse import quote
 
@@ -36,10 +37,18 @@ def gl_post(path: str, body: dict) -> dict:
         headers={"Authorization": f"Bearer {GL_API_KEY}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        result = json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        # Surface the GL's validation message as ValueError so endpoints return 400.
+        try:
+            message = json.load(exc).get("error") or f"GL error {exc.code}"
+        except Exception:
+            message = f"GL error {exc.code}"
+        raise ValueError(message)
     if isinstance(result, dict) and result.get("error"):
-        raise RuntimeError(result["error"])
+        raise ValueError(result["error"])
     return result
 
 
