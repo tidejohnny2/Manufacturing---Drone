@@ -13,6 +13,7 @@ Config comes from the environment (set in drones.env):
 """
 import json
 import os
+import subprocess
 import urllib.request
 from urllib.parse import quote
 
@@ -20,9 +21,33 @@ GL_BASE_URL = os.environ.get("GL_BASE_URL", "").rstrip("/")
 GL_API_KEY = os.environ.get("GL_API_KEY", "")
 GL_READS = os.environ.get("GL_READS", "0") == "1"
 
+# Inline read-time sync (Phase 3b): push new local postings into the GL right
+# before a GL-backed read so its balances are current. Reuses the onadapt-gl
+# mirror in --push-only mode.
+GL_DATABASE_URL = os.environ.get("GL_DATABASE_URL", "")
+LOCAL_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+GL_MIRROR_PYTHON = os.environ.get("GL_MIRROR_PYTHON", "/opt/onadapt-gl/venv/bin/python")
+GL_MIRROR_SCRIPT = os.environ.get("GL_MIRROR_SCRIPT", "/opt/onadapt-gl/mirror.py")
+
 
 def enabled() -> bool:
     return GL_READS and bool(GL_BASE_URL) and bool(GL_API_KEY)
+
+
+def sync_gl_now() -> None:
+    """Push new local postings into the GL now so a GL-backed read is fresh.
+    Runs the onadapt-gl mirror (--push-only). Raises on failure so the caller
+    falls back to the local ledger rather than showing controls against a stale
+    GL."""
+    if not (GL_DATABASE_URL and LOCAL_DATABASE_URL and os.path.exists(GL_MIRROR_SCRIPT)):
+        raise RuntimeError("GL inline sync is not configured")
+    env = dict(os.environ)
+    env["SOURCE_DATABASE_URL"] = LOCAL_DATABASE_URL
+    env["DATABASE_URL"] = GL_DATABASE_URL
+    subprocess.run(
+        [GL_MIRROR_PYTHON, GL_MIRROR_SCRIPT, "--push-only"],
+        env=env, timeout=20, capture_output=True, check=True,
+    )
 
 
 def gl_get(path: str) -> dict:
