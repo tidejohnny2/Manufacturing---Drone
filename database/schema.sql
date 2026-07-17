@@ -777,7 +777,7 @@ CREATE TABLE IF NOT EXISTS companies (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO companies (id, name, code) VALUES
-  (1, 'Drone Plant', 'PLANT'),
+  (1, 'Manufacturing Plant', 'PLANT'),
   (2, 'Meridian Components LLC', 'MERIDIAN')
 ON CONFLICT (id) DO NOTHING;
 SELECT setval(pg_get_serial_sequence('companies', 'id'), GREATEST((SELECT MAX(id) FROM companies), 1));
@@ -905,6 +905,26 @@ FROM vendors ven
 JOIN tag_groups g ON g.company_id = 1 AND g.name = 'Vendor'
 WHERE ven.company_id = 1 AND ven.account_code IS NOT NULL
 ON CONFLICT DO NOTHING;
+
+-- ===== Generic facility/app identity (migration 014) =====
+-- Station names + the plant company name lose "drone" (facility config, not
+-- product data; materials/BOM keep "drone" — we still make drones).
+UPDATE zones SET name = 'Component Kitting'
+  WHERE id = 'raw' AND name = 'Drone Component Kitting';
+UPDATE zones SET name = 'Finished Goods: Packaged Units'
+  WHERE id = 'fg' AND name = 'Finished Goods: Packaged Drones';
+UPDATE zones SET description = 'Inbound dock for supplier deliveries and component receiving checks.'
+  WHERE id = 'receiving' AND description LIKE '%drone component receiving%';
+UPDATE zones SET description = 'Stores packaged finished units as ready stock for allocation, picking, and shipment release.'
+  WHERE id = 'inventory' AND description LIKE '%packaged finished drones%';
+UPDATE zones SET description = 'Stores finished transport cases as pull stock for packaging.'
+  WHERE id = 'case_inventory' AND description LIKE '%drone transport cases%';
+UPDATE zones SET description = 'Builds the frame, mounts arms and motors, routes motor wires, and checks frame alignment before tightening.'
+  WHERE id = 'ws1' AND description LIKE '%drone frame%';
+UPDATE zones SET description = 'Cuts foam inserts and verifies unit, battery, and accessory cavity fit.'
+  WHERE id = 'cws2' AND description LIKE '%verifies drone%';
+UPDATE companies SET name = 'Manufacturing Plant'
+  WHERE id = 1 AND name = 'Drone Plant';
 
 -- Drop earlier signatures so the generalized functions below fully replace
 -- them instead of overloading them.
