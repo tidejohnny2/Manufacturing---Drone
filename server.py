@@ -2646,7 +2646,7 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
     rules = [
         # Product Line from the production order's finished good.
         """
-        SELECT l.id, t.id FROM cost_lines l
+        SELECT l.id, t.id, 100 FROM cost_lines l
         JOIN cost_entries e ON e.id = l.entry_id
         JOIN production_orders po ON po.id = e.production_order_id
         JOIN materials m ON m.id = po.finished_material_id
@@ -2656,7 +2656,7 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
         """,
         # Product Line from the account (COGS/subassembly/FG lines, no production order).
         """
-        SELECT l.id, t.id FROM cost_lines l
+        SELECT l.id, t.id, 100 FROM cost_lines l
         JOIN cost_entries e ON e.id = l.entry_id
         JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Product Line'
         JOIN account_tags t ON t.tag_group_id = g.id AND t.reference =
@@ -2666,7 +2666,7 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
         """,
         # Cost Center from the order-number prefix.
         """
-        SELECT l.id, t.id FROM cost_lines l
+        SELECT l.id, t.id, 100 FROM cost_lines l
         JOIN cost_entries e ON e.id = l.entry_id
         JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Cost Center'
         JOIN account_tags t ON t.tag_group_id = g.id AND t.name =
@@ -2676,7 +2676,7 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
         """,
         # Customer from the invoice.
         """
-        SELECT l.id, t.id FROM cost_lines l
+        SELECT l.id, t.id, 100 FROM cost_lines l
         JOIN cost_entries e ON e.id = l.entry_id
         JOIN invoices inv ON inv.invoice_no = e.order_no
         JOIN customers c ON c.id = inv.customer_id
@@ -2686,7 +2686,7 @@ def apply_auto_tags(cur, company_id: int = 1) -> None:
         """,
         # Vendor from the received PO.
         """
-        SELECT l.id, t.id FROM cost_lines l
+        SELECT l.id, t.id, 100 FROM cost_lines l
         JOIN cost_entries e ON e.id = l.entry_id
         JOIN purchase_orders p ON p.po_no = e.order_no
         JOIN vendors v ON v.id = p.vendor_id
