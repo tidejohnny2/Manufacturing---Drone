@@ -31,6 +31,7 @@ from psycopg.rows import dict_row
 PROC_BASE_URL = os.environ.get("PROC_BASE_URL", "").rstrip("/")
 PROC_API_KEY = os.environ.get("PROC_API_KEY", "")
 PROC_READS = os.environ.get("PROC_READS", "0") == "1"
+PROC_WRITES = os.environ.get("PROC_WRITES", "0") == "1"
 LOCAL_DATABASE_URL = os.environ.get("DATABASE_URL", "")
 PROC_DATABASE_URL = os.environ.get("PROC_DATABASE_URL", "")
 PROC_MIRROR_PYTHON = os.environ.get("PROC_MIRROR_PYTHON", "/opt/onadapt-procurement/venv/bin/python")
@@ -149,3 +150,87 @@ def settings() -> dict:
     return {"ordering_cost": float(s["ordering_cost"]),
             "carrying_rate_pct": float(s["carrying_rate_pct"]),
             "safety_stock_days": int(s["safety_stock_days"])}
+
+
+# ===== Phase 4a: dual-write the GL-safe purchasing writes to the service =====
+# When PROC_WRITES is on, each local purchasing write is ALSO written to the
+# service (best-effort, never raises), with ids aligned to local (vendor id,
+# po_no) so the two stay 1:1. The local write remains authoritative and is the
+# safety net; this makes the service write-current so Phase 4c can drop local.
+# Receiving (which posts to the GL) and Prefer flip in later stages.
+
+def writes_enabled() -> bool:
+    return PROC_WRITES and bool(PROC_BASE_URL) and bool(PROC_API_KEY)
+
+
+def proc_post(path: str, body: dict) -> dict:
+    req = urllib.request.Request(
+        PROC_BASE_URL + path, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {PROC_API_KEY}", "Content-Type": "application/json"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.load(resp)
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(data["error"])
+    return data
+
+
+def push_vendor(vendor_id, deleted: bool = False) -> None:
+    """Mirror a vendor create/update/delete to the service (delete -> deactivate,
+    since the service never deletes vendors). Best-effort; re-reads local for the
+    authoritative row so the account_code + id line up."""
+    if not writes_enabled() or vendor_id is None:
+        return
+    try:
+        if deleted:
+            proc_post("/v1/vendors", {"action": "deactivate", "vendorId": vendor_id})
+            return
+        with psycopg.connect(LOCAL_DATABASE_URL, row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, name, account_code, contact, terms, lead_time_days FROM vendors WHERE id=%s", (vendor_id,))
+            v = cur.fetchone()
+        if not v:
+            return
+        body = {"vendorId": v["id"], "name": v["name"], "accountCode": v["account_code"],
+                "contact": v["contact"], "terms": v["terms"], "leadTimeDays": v["lead_time_days"]}
+        try:
+            proc_post("/v1/vendors", {**body, "action": "create"})
+        except Exception:
+            proc_post("/v1/vendors", {**body, "action": "update"})
+    except Exception:
+        pass
+
+
+def push_settings(payload: dict) -> None:
+    """Mirror a settings edit (the three service-owned inputs) to the service."""
+    if not writes_enabled():
+        return
+    try:
+        proc_post("/v1/settings?company=1", {
+            "company": 1, "orderingCost": payload.get("orderingCost"),
+            "carryingRatePct": payload.get("carryingRatePct"),
+            "safetyStockDays": payload.get("safetyStockDays")})
+    except Exception:
+        pass
+
+
+def push_purchase_order(po_no) -> None:
+    """Mirror a newly-created local PO to the service with the SAME po_no, then
+    issue it (local POs are created issued). Re-reads the local lines so prices
+    line up exactly. Best-effort."""
+    if not writes_enabled() or not po_no:
+        return
+    try:
+        with psycopg.connect(LOCAL_DATABASE_URL, row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, vendor_id FROM purchase_orders WHERE po_no=%s", (po_no,))
+            po = cur.fetchone()
+            if not po:
+                return
+            cur.execute("SELECT part_number, quantity, unit_price FROM purchase_order_lines "
+                        "WHERE purchase_order_id=%s ORDER BY id", (po["id"],))
+            lines = [{"partNumber": l["part_number"], "quantity": l["quantity"],
+                      "unitPrice": float(l["unit_price"])} for l in cur.fetchall()]
+        proc_post("/v1/purchase-orders?company=1",
+                  {"company": 1, "poNo": po_no, "vendorId": po["vendor_id"], "lines": lines})
+        proc_post("/v1/purchase-orders/issue?company=1", {"company": 1, "poNo": po_no})
+    except Exception:
+        pass

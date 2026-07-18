@@ -5772,10 +5772,14 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, ship_and_invoice(payload))
                 return
             if path == "/api/purchasing/vendor":
-                json_response(self, HTTPStatus.OK, manage_vendor(payload))
+                result = manage_vendor(payload)
+                proc_backed.push_vendor(result.get("vendorId"), deleted=(result.get("action") == "delete"))
+                json_response(self, HTTPStatus.OK, result)
                 return
             if path == "/api/purchasing/settings":
-                json_response(self, HTTPStatus.OK, set_purchasing_settings(payload))
+                result = set_purchasing_settings(payload)
+                proc_backed.push_settings(result)
+                json_response(self, HTTPStatus.OK, result)
                 return
             if path == "/api/purchasing/minmax":
                 json_response(self, HTTPStatus.OK, set_part_min_max(payload))
@@ -5784,7 +5788,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, set_preferred_offer(payload))
                 return
             if path == "/api/purchasing/order":
-                json_response(self, HTTPStatus.OK, create_vendor_po(payload))
+                result = create_vendor_po(payload)
+                proc_backed.push_purchase_order(result.get("poNo"))
+                json_response(self, HTTPStatus.OK, result)
                 return
             if path == "/api/purchasing/receive":
                 json_response(self, HTTPStatus.OK, receive_vendor_po(payload))
