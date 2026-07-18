@@ -22,7 +22,7 @@ import proc_backed
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get("DATABASE_URL")
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 ACTIVE_STATUSES = ("planned", "released", "in_progress", "hold")
 DEFAULT_FINISHED_SKU = "DRN-FG-600"
 ORDER_PREFIXES = {"DRN-FG-600": "DRN-PO-", "CASE-FG-500": "CASE-PO-"}
