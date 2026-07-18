@@ -3848,11 +3848,23 @@ def receive_vendor_po(payload: dict) -> dict:
 
             total = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
             vendor_ref = f"{po['vendor_code']} {po['vendor']}" if po.get("vendor_code") else po["vendor"]
-            post_cost_entry(
-                cur, f"{po_no}-RCV", None, po_no, "po_receipt",
-                f"{po_no}: receive {len(lines)} line(s) from {vendor_ref} at PO prices",
-                [(RM_ACCOUNT, total, 0), (AP_ACCOUNT, 0, total)],
-            )
+            if proc_backed.writes_enabled():
+                # Phase 4b: auto-invoice at receive. The service posts DR inventory /
+                # CR GR-IR then DR GR-IR / CR AP to the GL (net DR RM / CR AP) under
+                # the manufacturing tenant's books; the local RM/AP post is skipped
+                # (no double-post). Bins + reprice above stay local. Raises on
+                # failure -> the whole local receive rolls back for a clean retry.
+                proc_backed.push_receive(
+                    po_no,
+                    [{"partNumber": l["part_number"], "quantity": l["quantity"],
+                      "unitPrice": float(l["unit_price"])} for l in lines],
+                )
+            else:
+                post_cost_entry(
+                    cur, f"{po_no}-RCV", None, po_no, "po_receipt",
+                    f"{po_no}: receive {len(lines)} line(s) from {vendor_ref} at PO prices",
+                    [(RM_ACCOUNT, total, 0), (AP_ACCOUNT, 0, total)],
+                )
             cur.execute(
                 "UPDATE purchase_orders SET status = 'received', received_at = now() WHERE id = %s",
                 (po["id"],),
@@ -5785,7 +5797,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, set_part_min_max(payload))
                 return
             if path == "/api/purchasing/preferred":
-                json_response(self, HTTPStatus.OK, set_preferred_offer(payload))
+                result = set_preferred_offer(payload)
+                proc_backed.push_preferred(payload)
+                json_response(self, HTTPStatus.OK, result)
                 return
             if path == "/api/purchasing/order":
                 result = create_vendor_po(payload)

@@ -234,3 +234,56 @@ def push_purchase_order(po_no) -> None:
         proc_post("/v1/purchase-orders/issue?company=1", {"company": 1, "poNo": po_no})
     except Exception:
         pass
+
+
+def push_preferred(payload: dict) -> None:
+    """Mirror a Prefer toggle: resolve the SERVICE offer id for the local offer's
+    (vendor, part) — local sends the local offer id — and set it preferred on the
+    service. Best-effort."""
+    if not writes_enabled():
+        return
+    try:
+        offer_id = int(payload.get("vendorPartId", 0))
+        with psycopg.connect(LOCAL_DATABASE_URL, row_factory=dict_row) as conn, conn.cursor() as cur:
+            cur.execute("SELECT vendor_id, part_number FROM vendor_parts WHERE id=%s", (offer_id,))
+            o = cur.fetchone()
+        if not o:
+            return
+        offers = proc_get(f"/v1/vendor-parts?vendor={o['vendor_id']}").get("vendorParts", [])
+        match = next((s for s in offers if s["part_number"] == o["part_number"]), None)
+        if match:
+            proc_post("/v1/vendor-parts", {"action": "update", "id": match["id"], "preferred": True})
+    except Exception:
+        pass
+
+
+# ===== Phase 4b: Receive via the service (auto-invoice at receive) =====
+# The one write that posts to the GL. Receiving calls the service to receive +
+# auto-create-invoice + auto-match, so the GL gets DR inventory / CR GR-IR then
+# DR GR-IR / CR AP (net DR RM / CR AP) — under the manufacturing tenant's GL
+# books, via the service's gl_credentials. The local receive stops its own
+# DR RM / CR AP post (no double). Bins + reprice stay local.
+
+def _service_po(po_no):
+    for p in proc_get("/v1/purchase-orders?company=1").get("purchaseOrders", []):
+        if p["po_no"] == po_no:
+            return p
+    return None
+
+
+def push_receive(po_no, lines) -> None:
+    """Receive a PO through the service (receipt + auto-invoice + 3-way match).
+    Resumable/idempotent per PO so a retry after a partial failure completes it.
+    RAISES on failure — receiving must never silently skip the AP posting."""
+    po = _service_po(po_no)
+    if po is None:
+        raise RuntimeError(f"{po_no} is not on the procurement service")
+    if po["status"] != "received":
+        proc_post("/v1/receipts?company=1", {"company": 1, "poNo": po_no})
+    already_posted = any(
+        i.get("purchase_order_id") == po["id"] and i.get("status") == "posted"
+        for i in proc_get("/v1/invoices?company=1").get("invoices", []))
+    if not already_posted:
+        inv = proc_post("/v1/invoices?company=1",
+                        {"company": 1, "vendorId": po["vendor_id"], "poNo": po_no, "lines": lines})
+        proc_post("/v1/invoices/match?company=1", {"company": 1, "invoiceNo": inv["invoiceNo"]})
