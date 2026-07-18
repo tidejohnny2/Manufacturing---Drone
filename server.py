@@ -3388,14 +3388,27 @@ def fetch_purchasing() -> dict:
             for offer in catalog:
                 offer["breaks"] = breaks_by_offer.get(offer["id"], [])
 
-            # Phase 3a: when PROC_READS is on, serve the vendor master from
-            # onadapt-procurement (the local query above is the fallback). The
-            # sourcing catalog flips in Phase 3b: its offer ids drive the local
-            # "Prefer" write, and the service assigns its own ids, so the catalog
-            # read must flip together with its write path (offer-id stability).
+            # Phase 3: when PROC_READS is on, serve the vendor master, sourcing
+            # catalog, and policy inputs from onadapt-procurement (the local queries
+            # are the fallback). sync_now() first pushes the latest local purchasing
+            # into the service so a just-created PO / edited vendor is current; the
+            # planner below then prices off the service's catalog. The PO register
+            # flips after the local pos assembly further down.
             if proc_backed.enabled():
                 try:
+                    proc_backed.sync_now()
+                except Exception:
+                    pass
+                try:
                     vendors = proc_backed.vendors()
+                except Exception:
+                    pass
+                try:
+                    catalog = proc_backed.catalog()
+                except Exception:
+                    pass
+                try:
+                    settings = {**settings, **proc_backed.settings()}
                 except Exception:
                     pass
 
@@ -3530,6 +3543,14 @@ def fetch_purchasing() -> dict:
                 lines = lines_by_po.get(po["id"], [])
                 po["lines"] = lines
                 po["total"] = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
+
+            # Phase 3b: serve the PO register from the service too (kept fresh by
+            # the sync_now above; falls back to the local pos assembled here).
+            if proc_backed.enabled():
+                try:
+                    pos = proc_backed.purchase_orders()
+                except Exception:
+                    pass
 
     ap_balance = gl_backed.account_balance(1, AP_ACCOUNT)
 
