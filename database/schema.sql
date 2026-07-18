@@ -1198,9 +1198,8 @@ BEGIN
   DELETE FROM inbound_emails;
   DELETE FROM invoices;
   DELETE FROM sales_orders;
-  -- Vendor POs purge; vendors, the sourcing catalog, and purchasing
-  -- policy settings persist as master data.
-  DELETE FROM purchase_orders;
+  -- Vendor POs / receipts / invoices live on the onadapt-procurement service
+  -- now (Phase 4c); clearing them there on reset is wired separately.
 
   UPDATE inventory_items AS i
   SET quantity_on_hand = baseline.on_hand,
@@ -1245,3 +1244,17 @@ $$;
 DROP TABLE IF EXISTS tag_distributions CASCADE;
 DROP TABLE IF EXISTS cost_lines CASCADE;
 DROP TABLE IF EXISTS cost_entries CASCADE;
+
+-- ===================================================================
+-- Phase 4c: purchasing moved to the shared onadapt-procurement service
+-- (vendors / sourcing catalog / POs are read AND written via its /v1 API;
+-- receiving posts to the GL through the service). Like the cost ledger
+-- above, the local purchasing tables are created/seeded/altered by the
+-- earlier blocks and then removed here, in one apply. purchasing_settings
+-- is KEPT — it holds the app-specific planned_annual_builds the planner needs.
+-- ===================================================================
+DROP TABLE IF EXISTS purchase_order_lines CASCADE;
+DROP TABLE IF EXISTS purchase_orders CASCADE;
+DROP TABLE IF EXISTS vendor_price_breaks CASCADE;
+DROP TABLE IF EXISTS vendor_parts CASCADE;
+DROP TABLE IF EXISTS vendors CASCADE;
