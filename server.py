@@ -2720,15 +2720,19 @@ def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, f
         stock.get("CASE-FG-500", 0) * cards["CASE-FG-500"]["unit_std"] - case_in_transit, 2
     )
     fg_expected = round(stock.get("DRN-FG-600", 0) * cards["DRN-FG-600"]["unit_std"], 2)
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
-        FROM purchase_order_lines l
-        JOIN purchase_orders p ON p.id = l.purchase_order_id
-        WHERE p.status = 'received' AND p.company_id = 1
-        """
-    )
-    received_total = round(float(cur.fetchone()["total"]), 2)
+    if proc_backed.enabled():
+        # Phase 4c: received POs live on the service (AP tie-out control).
+        received_total = proc_backed.received_po_total()
+    else:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(l.quantity * l.unit_price), 0) AS total
+            FROM purchase_order_lines l
+            JOIN purchase_orders p ON p.id = l.purchase_order_id
+            WHERE p.status = 'received' AND p.company_id = 1
+            """
+        )
+        received_total = round(float(cur.fetchone()["total"]), 2)
     return expected_wip, case_expected, fg_expected, received_total
 
 
@@ -3295,9 +3299,11 @@ def ship_and_invoice(payload: dict) -> dict:
 
 
 def _purchasing_ready(cur) -> None:
-    cur.execute("SELECT to_regclass('purchase_orders') AS reg")
+    # purchasing_settings is the one purchasing table kept locally (it holds the
+    # app-specific planned_annual_builds); the rest live on onadapt-procurement.
+    cur.execute("SELECT to_regclass('purchasing_settings') AS reg")
     if cur.fetchone()["reg"] is None:
-        raise ValueError("Purchasing tables are not installed yet.")
+        raise ValueError("Purchasing is not installed yet.")
 
 
 def _price_at_qty(base_price: float, breaks: list[dict], quantity: int) -> float:
@@ -3353,64 +3359,48 @@ def fetch_purchasing() -> dict:
             cur.execute("SELECT * FROM purchasing_settings WHERE id = 1")
             settings = cur.fetchone()
 
-            cur.execute(
-                """
-                SELECT v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days,
-                       COUNT(po.id) AS po_count
-                FROM vendors v
-                LEFT JOIN purchase_orders po ON po.vendor_id = v.id
-                GROUP BY v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days
-                ORDER BY v.account_code
-                """
-            )
-            vendors = cur.fetchall()
-
-            cur.execute(
-                """
-                SELECT vp.id, vp.vendor_id, v.name AS vendor, vp.part_number, vp.vendor_model,
-                       vp.description, vp.unit_price, vp.moq,
-                       COALESCE(vp.lead_time_days, v.lead_time_days) AS lead_time_days,
-                       vp.availability, vp.preferred
-                FROM vendor_parts vp
-                JOIN vendors v ON v.id = vp.vendor_id
-                ORDER BY vp.part_number, vp.preferred DESC, vp.unit_price
-                """
-            )
-            catalog = cur.fetchall()
-            cur.execute(
-                "SELECT vendor_part_id, min_qty, unit_price FROM vendor_price_breaks ORDER BY min_qty"
-            )
-            breaks_by_offer: dict[int, list] = {}
-            for row in cur.fetchall():
-                breaks_by_offer.setdefault(row["vendor_part_id"], []).append(
-                    {"min_qty": row["min_qty"], "unit_price": float(row["unit_price"])}
-                )
-            for offer in catalog:
-                offer["breaks"] = breaks_by_offer.get(offer["id"], [])
-
-            # Phase 3: when PROC_READS is on, serve the vendor master, sourcing
-            # catalog, and policy inputs from onadapt-procurement (the local queries
-            # are the fallback). sync_now() first pushes the latest local purchasing
-            # into the service so a just-created PO / edited vendor is current; the
-            # planner below then prices off the service's catalog. The PO register
-            # flips after the local pos assembly further down.
+            # Phase 4c: when PROC_READS is on, the vendor master, sourcing catalog,
+            # and the 3 service-owned policy inputs come from onadapt-procurement
+            # (service-native ids); planned_annual_builds stays in the local
+            # purchasing_settings row above. Otherwise read them locally.
             if proc_backed.enabled():
-                try:
-                    proc_backed.sync_now()
-                except Exception:
-                    pass
-                try:
-                    vendors = proc_backed.vendors()
-                except Exception:
-                    pass
-                try:
-                    catalog = proc_backed.catalog()
-                except Exception:
-                    pass
-                try:
-                    settings = {**settings, **proc_backed.settings()}
-                except Exception:
-                    pass
+                vendors = proc_backed.vendors()
+                catalog = proc_backed.catalog()
+                settings = {**settings, **proc_backed.settings()}
+            else:
+                cur.execute(
+                    """
+                    SELECT v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days,
+                           COUNT(po.id) AS po_count
+                    FROM vendors v
+                    LEFT JOIN purchase_orders po ON po.vendor_id = v.id
+                    GROUP BY v.id, v.account_code, v.name, v.contact, v.terms, v.lead_time_days
+                    ORDER BY v.account_code
+                    """
+                )
+                vendors = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT vp.id, vp.vendor_id, v.name AS vendor, vp.part_number, vp.vendor_model,
+                           vp.description, vp.unit_price, vp.moq,
+                           COALESCE(vp.lead_time_days, v.lead_time_days) AS lead_time_days,
+                           vp.availability, vp.preferred
+                    FROM vendor_parts vp
+                    JOIN vendors v ON v.id = vp.vendor_id
+                    ORDER BY vp.part_number, vp.preferred DESC, vp.unit_price
+                    """
+                )
+                catalog = cur.fetchall()
+                cur.execute(
+                    "SELECT vendor_part_id, min_qty, unit_price FROM vendor_price_breaks ORDER BY min_qty"
+                )
+                breaks_by_offer: dict[int, list] = {}
+                for row in cur.fetchall():
+                    breaks_by_offer.setdefault(row["vendor_part_id"], []).append(
+                        {"min_qty": row["min_qty"], "unit_price": float(row["unit_price"])}
+                    )
+                for offer in catalog:
+                    offer["breaks"] = breaks_by_offer.get(offer["id"], [])
 
             # Per-finished-unit usage of each buy part; the transport case is
             # consumed 1:1 by the drone, so case buy parts roll in directly.
@@ -3514,43 +3504,39 @@ def fetch_purchasing() -> dict:
                     "actual_cost": float(std["actual_cost"]) if std else None,
                 })
 
-            cur.execute(
-                """
-                SELECT po.id, po.po_no, po.status, po.created_at, po.received_at,
-                       v.name AS vendor, v.account_code AS vendor_code
-                FROM purchase_orders po
-                JOIN vendors v ON v.id = po.vendor_id
-                ORDER BY po.id DESC
-                LIMIT 40
-                """
-            )
-            pos = cur.fetchall()
-            po_ids = [po["id"] for po in pos]
-            lines_by_po: dict[int, list] = {}
-            if po_ids:
+            # Phase 4c: PO register from the service when reads are on; else local.
+            if proc_backed.enabled():
+                pos = proc_backed.purchase_orders()
+            else:
                 cur.execute(
                     """
-                    SELECT purchase_order_id, part_number, vendor_model, quantity, unit_price
-                    FROM purchase_order_lines
-                    WHERE purchase_order_id = ANY(%s)
-                    ORDER BY id
-                    """,
-                    (po_ids,),
+                    SELECT po.id, po.po_no, po.status, po.created_at, po.received_at,
+                           v.name AS vendor, v.account_code AS vendor_code
+                    FROM purchase_orders po
+                    JOIN vendors v ON v.id = po.vendor_id
+                    ORDER BY po.id DESC
+                    LIMIT 40
+                    """
                 )
-                for line in cur.fetchall():
-                    lines_by_po.setdefault(line["purchase_order_id"], []).append(line)
-            for po in pos:
-                lines = lines_by_po.get(po["id"], [])
-                po["lines"] = lines
-                po["total"] = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
-
-            # Phase 3b: serve the PO register from the service too (kept fresh by
-            # the sync_now above; falls back to the local pos assembled here).
-            if proc_backed.enabled():
-                try:
-                    pos = proc_backed.purchase_orders()
-                except Exception:
-                    pass
+                pos = cur.fetchall()
+                po_ids = [po["id"] for po in pos]
+                lines_by_po: dict[int, list] = {}
+                if po_ids:
+                    cur.execute(
+                        """
+                        SELECT purchase_order_id, part_number, vendor_model, quantity, unit_price
+                        FROM purchase_order_lines
+                        WHERE purchase_order_id = ANY(%s)
+                        ORDER BY id
+                        """,
+                        (po_ids,),
+                    )
+                    for line in cur.fetchall():
+                        lines_by_po.setdefault(line["purchase_order_id"], []).append(line)
+                for po in pos:
+                    lines = lines_by_po.get(po["id"], [])
+                    po["lines"] = lines
+                    po["total"] = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
 
     ap_balance = gl_backed.account_balance(1, AP_ACCOUNT)
 
@@ -3566,6 +3552,8 @@ def fetch_purchasing() -> dict:
 
 
 def manage_vendor(payload: dict) -> dict:
+    if proc_backed.writes_enabled():
+        return proc_backed.manage_vendor(payload)
     action = str(payload.get("action", "")).strip()
     if action not in ("create", "update", "delete"):
         raise ValueError("action must be create, update, or delete.")
@@ -3620,6 +3608,8 @@ def set_purchasing_settings(payload: dict) -> dict:
         raise ValueError("Safety stock days cannot be negative.")
     if builds <= 0:
         raise ValueError("Planned annual builds must be greater than zero.")
+    if proc_backed.writes_enabled():
+        proc_backed.set_settings(payload)  # the 3 service-owned inputs; builds stays local below
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             _purchasing_ready(cur)
@@ -3668,6 +3658,8 @@ def set_part_min_max(payload: dict) -> dict:
 
 
 def set_preferred_offer(payload: dict) -> dict:
+    if proc_backed.writes_enabled():
+        return proc_backed.set_preferred(payload.get("vendorPartId"))
     offer_id = int(payload.get("vendorPartId", 0))
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -3685,6 +3677,8 @@ def set_preferred_offer(payload: dict) -> dict:
 
 
 def create_vendor_po(payload: dict) -> dict:
+    if proc_backed.writes_enabled():
+        return proc_backed.create_po(payload.get("vendorId"), payload.get("lines"))
     vendor_id = payload.get("vendorId")
     lines = payload.get("lines") or []
     if not lines:
@@ -3777,25 +3771,36 @@ def receive_vendor_po(payload: dict) -> dict:
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             _purchasing_ready(cur)
-            cur.execute(
-                """
-                SELECT po.id, po.status, v.name AS vendor,
-                       v.account_code AS vendor_code
-                FROM purchase_orders po JOIN vendors v ON v.id = po.vendor_id
-                WHERE po.po_no = %s
-                """,
-                (po_no,),
-            )
-            po = cur.fetchone()
-            if not po:
-                raise ValueError(f"Unknown purchase order {po_no}.")
-            if po["status"] != "issued":
-                raise ValueError(f"{po_no} is already {po['status']}.")
-            cur.execute(
-                "SELECT part_number, quantity, unit_price FROM purchase_order_lines WHERE purchase_order_id = %s ORDER BY id",
-                (po["id"],),
-            )
-            lines = cur.fetchall()
+            if proc_backed.writes_enabled():
+                # Service-only: read the issued PO (and its lines) from the service.
+                spo = proc_backed.fetch_po(po_no)
+                if not spo:
+                    raise ValueError(f"Unknown purchase order {po_no}.")
+                if spo["status"] != "issued":
+                    raise ValueError(f"{po_no} is already {spo['status']}.")
+                po = {"id": None, "vendor": spo.get("vendor"), "vendor_code": None}
+                lines = [{"part_number": l["part_number"], "quantity": l["quantity"],
+                          "unit_price": l["unit_price"]} for l in spo.get("lines", [])]
+            else:
+                cur.execute(
+                    """
+                    SELECT po.id, po.status, v.name AS vendor,
+                           v.account_code AS vendor_code
+                    FROM purchase_orders po JOIN vendors v ON v.id = po.vendor_id
+                    WHERE po.po_no = %s
+                    """,
+                    (po_no,),
+                )
+                po = cur.fetchone()
+                if not po:
+                    raise ValueError(f"Unknown purchase order {po_no}.")
+                if po["status"] != "issued":
+                    raise ValueError(f"{po_no} is already {po['status']}.")
+                cur.execute(
+                    "SELECT part_number, quantity, unit_price FROM purchase_order_lines WHERE purchase_order_id = %s ORDER BY id",
+                    (po["id"],),
+                )
+                lines = cur.fetchall()
             if not lines:
                 raise ValueError(f"{po_no} has no lines.")
 
@@ -3865,10 +3870,12 @@ def receive_vendor_po(payload: dict) -> dict:
                     f"{po_no}: receive {len(lines)} line(s) from {vendor_ref} at PO prices",
                     [(RM_ACCOUNT, total, 0), (AP_ACCOUNT, 0, total)],
                 )
-            cur.execute(
-                "UPDATE purchase_orders SET status = 'received', received_at = now() WHERE id = %s",
-                (po["id"],),
-            )
+            if not proc_backed.writes_enabled():
+                # Service-only: the service's receipt already marked its PO received.
+                cur.execute(
+                    "UPDATE purchase_orders SET status = 'received', received_at = now() WHERE id = %s",
+                    (po["id"],),
+                )
         conn.commit()
     return {
         "poNo": po_no,
@@ -5785,26 +5792,19 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/purchasing/vendor":
                 result = manage_vendor(payload)
-                proc_backed.push_vendor(result.get("vendorId"), deleted=(result.get("action") == "delete"))
                 json_response(self, HTTPStatus.OK, result)
                 return
             if path == "/api/purchasing/settings":
-                result = set_purchasing_settings(payload)
-                proc_backed.push_settings(result)
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, set_purchasing_settings(payload))
                 return
             if path == "/api/purchasing/minmax":
                 json_response(self, HTTPStatus.OK, set_part_min_max(payload))
                 return
             if path == "/api/purchasing/preferred":
-                result = set_preferred_offer(payload)
-                proc_backed.push_preferred(payload)
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, set_preferred_offer(payload))
                 return
             if path == "/api/purchasing/order":
-                result = create_vendor_po(payload)
-                proc_backed.push_purchase_order(result.get("poNo"))
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, create_vendor_po(payload))
                 return
             if path == "/api/purchasing/receive":
                 json_response(self, HTTPStatus.OK, receive_vendor_po(payload))
