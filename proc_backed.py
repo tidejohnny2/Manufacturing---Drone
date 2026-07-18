@@ -229,3 +229,15 @@ def push_receive(po_no, lines) -> None:
         inv = proc_post("/v1/invoices?company=1",
                         {"company": 1, "vendorId": po["vendor_id"], "poNo": po_no, "lines": lines})
         proc_post("/v1/invoices/match?company=1", {"company": 1, "invoiceNo": inv["invoiceNo"]})
+
+
+def reset() -> None:
+    """Clear the tenant's purchasing transactions (POs / receipts / invoices) on
+    the service — a dev-mode purge must clear the service too, since the register
+    reads from it. Best-effort: never raises."""
+    if not (PROC_BASE_URL and PROC_API_KEY):
+        return
+    try:
+        proc_post("/v1/reset", {})
+    except Exception:
+        pass

@@ -5832,7 +5832,8 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/reset-activity":
                 result = reset_activity(payload)
-                gl_backed.reset_gl()  # a dev-mode purge must clear the GL too
+                gl_backed.reset_gl()   # a dev-mode purge must clear the GL too
+                proc_backed.reset()    # ...and the procurement service's purchasing transactions
                 json_response(self, HTTPStatus.OK, result)
                 return
             json_response(self, HTTPStatus.CREATED, create_order(payload))
