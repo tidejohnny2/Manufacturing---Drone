@@ -5799,7 +5799,7 @@ def main() -> None:
     # Order-intake worker: mailbox polling (if configured), email
     # classification, and backorder fulfillment run in the background.
     threading.Thread(target=intake_worker, daemon=True).start()
-    print(f"Manufacturing app {APP_VERSION} running at http://127.0.0.1:{port}/production-orders.html")
+    print(f"Manufacturing app {APP_VERSION} running at http://127.0.0.1:{port}/production-orders.html", flush=True)
     server.serve_forever()
 
 
