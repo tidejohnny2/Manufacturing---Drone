@@ -1,6 +1,6 @@
 INSERT INTO facilities (id, name, description, unit)
 VALUES
-  (1, 'Drone Manufacturing Floor Map', 'Prototype drone production floor with component kitting, airframe build, electronics integration, firmware calibration, motor testing, QA flight testing, packaging, and finished-goods storage.', 'sq ft');
+  (1, 'Manufacturing Floor Map', 'Prototype production floor with component kitting, airframe build, electronics integration, firmware calibration, motor testing, QA flight testing, packaging, and finished-goods storage.', 'sq ft');
 
 INSERT INTO zones (
   id, facility_id, name, zone_type, process_order, area_sq_ft, primary_flow,
@@ -128,7 +128,7 @@ VALUES
 -- into Case Inventory, where drone packaging pulls them as a BOM component.
 INSERT INTO facilities (id, name, description, unit)
 VALUES
-  (2, 'Drone Case Production Line', 'Case line that forms, fits, assembles, inspects, and stocks drone transport cases as manufactured sub-assembly inventory for drone packaging pull.', 'sq ft');
+  (2, 'Case Production Line', 'Case line that forms, fits, assembles, inspects, and stocks transport cases as manufactured sub-assembly inventory for packaging pull.', 'sq ft');
 
 INSERT INTO zones (
   id, facility_id, name, zone_type, process_order, area_sq_ft, primary_flow,

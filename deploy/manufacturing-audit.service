@@ -1,7 +1,7 @@
 [Unit]
-Description=Drone plant internal audit certification (scheduled)
-After=drones.service
-Requires=drones.service
+Description=Manufacturing plant internal audit certification (scheduled)
+After=manufacturing.service
+Requires=manufacturing.service
 
 [Service]
 Type=oneshot

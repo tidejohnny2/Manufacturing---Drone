@@ -1,8 +1,8 @@
 # Manufacturing Floor Database
 
-This folder contains the PostgreSQL schema, seed data, and setup script for the drone manufacturing floor map prototype. It covers two production lines:
+This folder contains the PostgreSQL schema, seed data, and setup script for the manufacturing floor map prototype. It covers two production lines:
 
-- **Facility 1 — Drone floor**: builds packaged inspection drones (`DRN-FG-600`).
+- **Facility 1 — Manufacturing floor**: builds packaged inspection drones (`DRN-FG-600`).
 - **Facility 2 — Case line**: manufactures drone transport cases (`CASE-FG-500`) and stocks them into Case Inventory. The drone BOM pulls one case per drone from that stock: the pull is allocated when a drone order is created and consumed when the drone order completes.
 
 ## Files
@@ -32,7 +32,7 @@ python database/setup_postgres.py
 
 ## Main Tables
 
-- `facilities`: the drone manufacturing floor (1) and the case production line (2).
+- `facilities`: the manufacturing floor (1) and the case production line (2).
 - `zones`: drone floor zones plus the case line (case receiving, staging, shell forming, foam fit, hardware, inspection, case FG, and case inventory).
 - `materials`: drone and case kits, WIP stages, and finished goods.
 - `process_steps`: per-facility movement sequence; each facility runs its own route.

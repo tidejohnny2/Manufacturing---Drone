@@ -4672,7 +4672,7 @@ def build_audit_package() -> dict:
 
     package = {
         "meta": {
-            "entity": "Manufacturing Demo Plant (drones.onadapt.com)",
+            "entity": "Manufacturing Demo Plant (manufacturing.onadapt.com)",
             "report": "Internal audit package - standard costing cycle",
             "as_of": datetime.now(timezone.utc).isoformat(),
             "basis": (

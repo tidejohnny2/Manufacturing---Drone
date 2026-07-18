@@ -7,7 +7,7 @@ POST /v1/journal-entries. Manufacturing is a proper API client of the GL — it
 posts journals, it does not copy rows into the GL's database. The local ledger
 stays as the reconcilable safety net; the GL-side mirror timer only reconciles.
 
-Config comes from the environment (set in drones.env):
+Config comes from the environment (set in manufacturing.env):
     GL_BASE_URL   e.g. http://127.0.0.1:8798
     GL_API_KEY    the manufacturing tenant's bearer key
     GL_READS      "1" to serve reads from the GL, anything else = local
