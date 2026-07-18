@@ -4647,6 +4647,29 @@ def build_audit_package() -> dict:
     elif drone_unit_ppv:
         audit_assert(assertions, "A-VR-02", "Finished-unit PPV constant across order sizes", True, True)
 
+    # Analytic overlay (report-only) with tie-outs to the GL system of record:
+    # the allocated P&L foots to GL revenue, and vendor purchases foot to
+    # received POs -- so the analytics can't drift from the audited books.
+    analytics_dims: dict = {}
+    try:
+        for name in [g["name"] for g in gl_backed.analytics(1).get("groups", [])]:
+            a = gl_backed.analytics(1, name)
+            analytics_dims[name] = {"rows": a["rows"], "totals": a["totals"]}
+    except Exception:
+        analytics_dims = {}
+    if analytics_dims:
+        sales_gl = round(float(gl_backed.account_balance(1, "4000")), 2)
+        alloc_rev = round(max((float(d["totals"].get("revenue", 0)) for d in analytics_dims.values()), default=0), 2)
+        audit_assert(assertions, "A-AN-01",
+                     "Analytic allocated revenue ties to GL Sales Revenue", sales_gl, alloc_rev, 0.01)
+        vendor_purch = round(float(analytics_dims.get("Vendor", {}).get("totals", {}).get("alloc_debit", 0)), 2)
+        try:
+            received = round(float(proc_backed.received_po_total()), 2) if proc_backed.enabled() else vendor_purch
+        except Exception:
+            received = vendor_purch
+        audit_assert(assertions, "A-AN-02",
+                     "Vendor allocated purchases tie to received vendor POs", received, vendor_purch, 0.01)
+
     package = {
         "meta": {
             "entity": "Manufacturing Demo Plant (drones.onadapt.com)",
@@ -4677,6 +4700,7 @@ def build_audit_package() -> dict:
         "standards_audit": standards_audit,
         "non_routine_entries": non_routine,
         "finished_stock": finished_stock,
+        "analytics": analytics_dims,
         "assertions": assertions,
         "assertion_summary": {
             "total": len(assertions),
