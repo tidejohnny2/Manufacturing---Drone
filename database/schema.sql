@@ -1185,10 +1185,9 @@ BEGIN
   DELETE FROM production_orders;
   DELETE FROM work_orders;
   DELETE FROM station_signoffs;
-  -- Cost ledger resets with activity (including the opening-balance entry,
-  -- so costing re-initializes from restored stock). Standards and rates
-  -- persist as master data.
-  DELETE FROM cost_entries;
+  -- The double-entry ledger now lives in the shared onadapt-gl service; the app
+  -- clears it via POST /v1/reset on a dev-mode reset (gl_backed.reset_gl), and
+  -- costing re-initializes from restored stock. Standards/rates persist.
   -- DEVELOPMENT MODE: purge ALL transaction history, including audit
   -- certifications and the standards change log. Certification permanence
   -- ("audit history survives reset") is intentionally disabled during
@@ -1234,3 +1233,15 @@ BEGIN
     AND i.location_zone_id = baseline.location_zone_id;
 END;
 $$;
+
+-- ===================================================================
+-- GL-ONLY: the double-entry ledger now lives in the shared onadapt-gl
+-- service (the app posts journals to /v1/journal-entries and reads from
+-- it). Drop the local cost ledger and its analytic-overlay link. This
+-- runs after the fixup above (which still references these tables), so
+-- they are created/altered and then removed here, in one apply.
+-- (forbid_ledger_update is kept — audit_certifications still uses it.)
+-- ===================================================================
+DROP TABLE IF EXISTS tag_distributions CASCADE;
+DROP TABLE IF EXISTS cost_lines CASCADE;
+DROP TABLE IF EXISTS cost_entries CASCADE;

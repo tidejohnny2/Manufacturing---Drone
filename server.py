@@ -2072,7 +2072,8 @@ OPENING_ACCOUNT = "3000"
 
 
 def costing_ready(cur) -> bool:
-    cur.execute("SELECT to_regclass('cost_entries') AS reg")
+    # Costing master data (standards). The ledger itself now lives in the GL.
+    cur.execute("SELECT to_regclass('standard_costs') AS reg")
     return cur.fetchone()["reg"] is not None
 
 
@@ -2182,10 +2183,113 @@ def cost_card(cur, costing, sku, _depth=0) -> dict:
     }
 
 
+def _product_line_tag(cur, sku):
+    """The Product Line tag name for a finished-good SKU (e.g. 'Drone'/'Case'),
+    from the seeded tag definitions."""
+    cur.execute(
+        "SELECT at.name FROM account_tags at "
+        "JOIN tag_groups g ON g.id = at.tag_group_id AND g.name = 'Product Line' "
+        "WHERE at.reference = %s LIMIT 1",
+        (sku,),
+    )
+    row = cur.fetchone()
+    return row["name"] if row else None
+
+
+def compute_entry_tags(cur, event_type, reference, lines, company_id):
+    """Per-line analytic tags for a GL post, derived from local ground-truth
+    (orders/invoices/POs/materials). Only the plant (company 1) auto-tags. This
+    replaces the old apply_auto_tags SQL pass — with the ledger in the GL, tags
+    now travel with the journal entry at post time."""
+    tags = [[] for _ in lines]
+    if company_id != 1:
+        return tags
+
+    # Stock accounts always carry their Product Line (covers opening + COGS relief).
+    stock_pl = {"1330": "DRN-FG-600", "1315": "CASE-FG-500"}
+    for i, (account, _d, _c) in enumerate(lines):
+        if account in stock_pl:
+            pl = _product_line_tag(cur, stock_pl[account])
+            if pl:
+                tags[i].append({"group": "Product Line", "tag": pl, "pct": 100})
+
+    if not reference:
+        return tags
+
+    if event_type in ("dm_issue", "conversion", "variances", "fg_transfer"):
+        cur.execute(
+            "SELECT m.sku FROM production_orders po "
+            "JOIN materials m ON m.id = po.finished_material_id WHERE po.order_no = %s",
+            (reference,),
+        )
+        row = cur.fetchone()
+        pl = _product_line_tag(cur, row["sku"]) if row else None
+        cc = ("Assembly Line" if reference.startswith("DRN-PO")
+              else "Case Line" if reference.startswith("CASE-PO") else None)
+        for i, (account, _d, _c) in enumerate(lines):
+            if pl and account not in stock_pl:
+                tags[i].append({"group": "Product Line", "tag": pl, "pct": 100})
+            if cc:
+                tags[i].append({"group": "Cost Center", "tag": cc, "pct": 100})
+
+    elif event_type in ("revenue", "cogs"):
+        cur.execute("SELECT customer_id, sales_order_id FROM invoices WHERE invoice_no = %s", (reference,))
+        inv = cur.fetchone()
+        cust = None
+        if inv:
+            cur.execute("SELECT name FROM customers WHERE id = %s", (inv["customer_id"],))
+            row = cur.fetchone()
+            cust = row["name"] if row else None
+        if cust:
+            for t in tags:
+                t.append({"group": "Customer", "tag": cust, "pct": 100})
+        if event_type == "revenue" and inv:
+            cur.execute(
+                "SELECT sku, SUM(quantity * unit_price) AS amt FROM sales_order_lines "
+                "WHERE sales_order_id = %s GROUP BY sku",
+                (inv["sales_order_id"],),
+            )
+            rows = cur.fetchall()
+            total = sum(float(r["amt"]) for r in rows)
+            if total > 0:
+                for i, (account, _d, _c) in enumerate(lines):
+                    if account == "4000":
+                        for r in rows:
+                            pl = _product_line_tag(cur, r["sku"])
+                            if pl:
+                                tags[i].append({"group": "Product Line", "tag": pl,
+                                                "pct": round(100 * float(r["amt"]) / total, 4)})
+        if event_type == "cogs":
+            credits = {a: c for a, _d, c in lines if a in ("1330", "1315") and c > 0}
+            total = sum(credits.values())
+            if total > 0:
+                for i, (account, _d, _c) in enumerate(lines):
+                    if account == "5010":
+                        for stock_acct, amt in credits.items():
+                            pl = _product_line_tag(cur, stock_pl[stock_acct])
+                            if pl:
+                                tags[i].append({"group": "Product Line", "tag": pl,
+                                                "pct": round(100 * amt / total, 4)})
+
+    elif event_type == "po_receipt":
+        cur.execute(
+            "SELECT v.name FROM purchase_orders p JOIN vendors v ON v.id = p.vendor_id WHERE p.po_no = %s",
+            (reference,),
+        )
+        row = cur.fetchone()
+        if row:
+            for t in tags:
+                t.append({"group": "Vendor", "tag": row["name"], "pct": 100})
+
+    return tags
+
+
 def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines, company_id=1) -> bool:
-    """Insert one balanced double-entry journal entry; idempotent by event_ref.
-    company_id scopes the entry to a company's books (1 = the plant, and the
-    default for every engine posting)."""
+    """Post one balanced double-entry journal entry to the shared GL as a real
+    journal entry (POST /v1/journal-entries); idempotent by event_ref. Analytic
+    tags are computed from local ground-truth and travel with the entry.
+    (order_id is unused now — the GL keys on event_ref + the order_no reference;
+    cur is kept for the tag lookups and signature compatibility.)"""
     lines = [
         (account, round(debit, 2), round(credit, 2))
         for account, debit, credit in lines
@@ -2199,24 +2303,16 @@ def post_cost_entry(cur, event_ref, order_id, order_no, event_type, memo, lines,
         raise RuntimeError(
             f"Unbalanced cost entry {event_ref}: DR {total_debit} vs CR {total_credit}"
         )
-    cur.execute(
-        """
-        INSERT INTO cost_entries (event_ref, production_order_id, order_no, event_type, memo, company_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (event_ref) DO NOTHING
-        RETURNING id
-        """,
-        (event_ref, order_id, order_no, event_type, memo, company_id),
-    )
-    inserted = cur.fetchone()
-    if not inserted:
-        return False
-    for account, debit, credit in lines:
-        cur.execute(
-            "INSERT INTO cost_lines (entry_id, account_no, debit, credit, company_id) VALUES (%s, %s, %s, %s, %s)",
-            (inserted["id"], account, debit, credit, company_id),
-        )
-    return True
+    line_tags = compute_entry_tags(cur, event_type, order_no, lines, company_id)
+    result = gl_backed.gl_post("/v1/journal-entries", {
+        "company": company_id, "ref": event_ref, "type": event_type,
+        "reference": order_no, "memo": memo, "source": "manufacturing",
+        "lines": [
+            {"account": account, "debit": debit, "credit": credit, "tags": line_tags[i]}
+            for i, (account, debit, credit) in enumerate(lines)
+        ],
+    })
+    return not result.get("duplicate", False)
 
 
 def dm_issue_amounts(card, quantity) -> tuple[float, float, float, float]:
@@ -2242,10 +2338,10 @@ def station_conversion(card, costing, quantity) -> list[dict]:
     return rows
 
 
-def ensure_opening_entry(cur, costing) -> None:
-    """Book opening inventory once: RM at actual, cases and finished goods at standard."""
-    cur.execute("SELECT 1 FROM cost_entries WHERE event_ref = 'OPENING-BAL'")
-    if cur.fetchone():
+def ensure_opening_entry(cur, costing, posted) -> None:
+    """Book opening inventory once: RM at actual, cases and finished goods at
+    standard. `posted` is the GL's set of already-posted refs (idempotency)."""
+    if "OPENING-BAL" in posted:
         return
     cur.execute(
         "SELECT part_number, SUM(quantity_on_hand) AS on_hand FROM inventory_items GROUP BY part_number"
@@ -2284,17 +2380,11 @@ def sync_costing(cur, states) -> tuple[dict | None, dict]:
     costing = load_costing(cur)
     if costing is None:
         return None, {}
-    ensure_opening_entry(cur, costing)
+    # Idempotency now comes from the GL (the ledger): which refs are already posted.
+    posted = gl_backed.posted_refs(1)
+    ensure_opening_entry(cur, costing, posted)
 
     cards = {}
-    order_ids = [state["order"]["id"] for state in states if state["order"]["id"] and state["order"]["id"] > 0]
-    posted = set()
-    if order_ids:
-        cur.execute(
-            "SELECT event_ref FROM cost_entries WHERE production_order_id = ANY(%s)", (order_ids,)
-        )
-        posted = {row["event_ref"] for row in cur.fetchall()}
-
     for state in states:
         order = state["order"]
         if not order["id"] or order["id"] < 0 or order["production_status"] == "queued":
@@ -2394,17 +2484,9 @@ def post_completion_costing(cur, order, costing, card) -> None:
     wip_std, rm_actual, sub_std, ppv = dm_issue_amounts(card, quantity)
     # Transfer exactly what was absorbed into WIP for this order (the posted
     # ledger, not a recomputed card), so WIP zeroes to the penny even if a
-    # standard was edited while the order was in flight.
-    cur.execute(
-        """
-        SELECT COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0) AS wip_balance
-        FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        WHERE e.production_order_id = %s AND l.account_no = %s
-        """,
-        (order["id"], WIP_ACCOUNT),
-    )
-    posted_wip = round(float(cur.fetchone()["wip_balance"]), 2)
+    # standard was edited while the order was in flight. Read from the GL by the
+    # order's document reference (its order_no).
+    posted_wip = gl_backed.reference_net(1, order["order_no"], WIP_ACCOUNT)
     if posted_wip <= 0:
         posted_wip = round(wip_std + dl_applied + oh_applied, 2)
     # Stock always enters at the CURRENT standard; any difference against what
@@ -2462,29 +2544,6 @@ def run_simulation_sync(cur) -> list[dict]:
             sync_workstation_ledger(cur, state["order"], {"balances": state["balances"]})
     complete_finished_pipeline_orders(cur, all_states)
     return all_states
-
-
-def account_balances(cur, company_id=1) -> list[dict]:
-    cur.execute(
-        """
-        SELECT a.account_no, a.name, a.account_type, a.normal_side,
-               COALESCE(SUM(l.debit), 0) AS total_debit,
-               COALESCE(SUM(l.credit), 0) AS total_credit
-        FROM gl_accounts a
-        LEFT JOIN cost_lines l ON l.account_no = a.account_no AND l.company_id = a.company_id
-        WHERE a.company_id = %s
-        GROUP BY a.account_no, a.name, a.account_type, a.normal_side
-        ORDER BY a.account_no
-        """,
-        (company_id,),
-    )
-    rows = []
-    for row in cur.fetchall():
-        debit = float(row["total_debit"])
-        credit = float(row["total_credit"])
-        balance = round(debit - credit, 2) if row["normal_side"] == "debit" else round(credit - debit, 2)
-        rows.append({**row, "total_debit": round(debit, 2), "total_credit": round(credit, 2), "balance": balance})
-    return rows
 
 
 def gl_balance(balances: list[dict], account_no: str) -> float:
@@ -2557,8 +2616,7 @@ def fetch_costing_wip() -> dict:
                         "std_at_completion": at_completion,
                     }
                 )
-            balances = account_balances(cur)
-            wip_gl = gl_balance(balances, WIP_ACCOUNT)
+    wip_gl = gl_backed.account_balance(1, WIP_ACCOUNT)
     return {
         "orders": rows,
         "absorbed_total": absorbed_total,
@@ -2611,275 +2669,6 @@ def _ledger_date(value: str | None, label: str) -> str | None:
     except ValueError:
         raise ValueError(f"{label} must be a YYYY-MM-DD date.") from None
     return value
-
-
-def apply_auto_tags(cur, company_id: int = 1) -> None:
-    """Auto-tag cost lines from engine ground-truth — the plant already knows
-    each entry's product, cost center, customer, and vendor. Report-only:
-    writes only tag_distributions, never the immutable ledger. Idempotent
-    (only fills lines not yet tagged in a group), so it backfills history and
-    stays current. Keeps Customer/Vendor tags in sync with the subledgers."""
-    # Ensure a tag exists for every customer/vendor (new ones since seed).
-    cur.execute(
-        """
-        INSERT INTO account_tags (company_id, tag_group_id, name, reference)
-        SELECT c.company_id, g.id, c.name, c.account_code
-        FROM customers c JOIN tag_groups g ON g.company_id = c.company_id AND g.name = 'Customer'
-        WHERE c.company_id = %s AND c.account_code IS NOT NULL
-        ON CONFLICT DO NOTHING
-        """,
-        (company_id,),
-    )
-    cur.execute(
-        """
-        INSERT INTO account_tags (company_id, tag_group_id, name, reference)
-        SELECT v.company_id, g.id, v.name, v.account_code
-        FROM vendors v JOIN tag_groups g ON g.company_id = v.company_id AND g.name = 'Vendor'
-        WHERE v.company_id = %s AND v.account_code IS NOT NULL
-        ON CONFLICT DO NOTHING
-        """,
-        (company_id,),
-    )
-    # Each rule inserts a 100% distribution for lines not yet tagged in the group.
-    untagged = (
-        "NOT EXISTS (SELECT 1 FROM tag_distributions d JOIN account_tags at2 ON at2.id = d.account_tag_id "
-        "WHERE d.cost_line_id = l.id AND at2.tag_group_id = g.id)"
-    )
-    rules = [
-        # Product Line from the production order's finished good.
-        """
-        SELECT l.id, t.id, 100 FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        JOIN production_orders po ON po.id = e.production_order_id
-        JOIN materials m ON m.id = po.finished_material_id
-        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Product Line'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = m.sku
-        WHERE e.company_id = %s AND {u}
-        """,
-        # Product Line from the account (COGS/subassembly/FG lines, no production order).
-        """
-        SELECT l.id, t.id, 100 FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Product Line'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference =
-             CASE WHEN l.account_no = '1330' THEN 'DRN-FG-600'
-                  WHEN l.account_no = '1315' THEN 'CASE-FG-500' END
-        WHERE e.company_id = %s AND l.account_no IN ('1330', '1315') AND {u}
-        """,
-        # Cost Center from the order-number prefix.
-        """
-        SELECT l.id, t.id, 100 FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Cost Center'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.name =
-             CASE WHEN e.order_no LIKE 'DRN-PO%%' THEN 'Assembly Line'
-                  WHEN e.order_no LIKE 'CASE-PO%%' THEN 'Case Line' END
-        WHERE e.company_id = %s AND (e.order_no LIKE 'DRN-PO%%' OR e.order_no LIKE 'CASE-PO%%') AND {u}
-        """,
-        # Customer from the invoice.
-        """
-        SELECT l.id, t.id, 100 FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        JOIN invoices inv ON inv.invoice_no = e.order_no
-        JOIN customers c ON c.id = inv.customer_id
-        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Customer'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = c.account_code
-        WHERE e.company_id = %s AND e.event_type IN ('revenue', 'cogs') AND {u}
-        """,
-        # Vendor from the received PO.
-        """
-        SELECT l.id, t.id, 100 FROM cost_lines l
-        JOIN cost_entries e ON e.id = l.entry_id
-        JOIN purchase_orders p ON p.po_no = e.order_no
-        JOIN vendors v ON v.id = p.vendor_id
-        JOIN tag_groups g ON g.company_id = e.company_id AND g.name = 'Vendor'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = v.account_code
-        WHERE e.company_id = %s AND e.event_type = 'po_receipt' AND {u}
-        """,
-    ]
-    for rule in rules:
-        cur.execute(
-            "INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage) "
-            + rule.format(u=untagged)
-            + " AND t.id IS NOT NULL ON CONFLICT DO NOTHING",
-            (company_id,),
-        )
-
-    # Product Line SPLIT on the aggregate revenue (4000) and COGS (5010)
-    # lines — these are single lines per invoice, so they carry a proportional
-    # multi-tag distribution instead of one 100% tag. This is what makes the
-    # Product Line dimension show revenue/COGS/margin. (Idempotent via the
-    # (cost_line_id, account_tag_id) unique + ON CONFLICT DO NOTHING; % is
-    # deterministic from the same source amounts.)
-    # Revenue split by the sales-order lines' per-SKU value.
-    cur.execute(
-        """
-        WITH rev_split AS (
-          SELECT e.id AS entry_id, sol.sku, SUM(sol.quantity * sol.unit_price) AS amt
-          FROM cost_entries e
-          JOIN invoices inv ON inv.invoice_no = e.order_no
-          JOIN sales_order_lines sol ON sol.sales_order_id = inv.sales_order_id
-          WHERE e.company_id = %s AND e.event_type = 'revenue'
-          GROUP BY e.id, sol.sku
-        ),
-        rev_total AS (SELECT entry_id, SUM(amt) AS total FROM rev_split GROUP BY entry_id)
-        INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage)
-        SELECT sl.id, t.id, ROUND(100.0 * rs.amt / rt.total, 4)
-        FROM rev_split rs
-        JOIN rev_total rt ON rt.entry_id = rs.entry_id
-        JOIN cost_lines sl ON sl.entry_id = rs.entry_id AND sl.account_no = '4000'
-        JOIN tag_groups g ON g.company_id = %s AND g.name = 'Product Line'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference = rs.sku
-        WHERE rt.total > 0
-        ON CONFLICT DO NOTHING
-        """,
-        (company_id, company_id),
-    )
-    # COGS split by the sibling 1330/1315 credits in the same entry.
-    cur.execute(
-        """
-        WITH cogs_split AS (
-          SELECT e.id AS entry_id, cl.account_no, SUM(cl.credit) AS amt
-          FROM cost_entries e
-          JOIN cost_lines cl ON cl.entry_id = e.id
-          WHERE e.company_id = %s AND e.event_type = 'cogs'
-            AND cl.account_no IN ('1330', '1315') AND cl.credit > 0
-          GROUP BY e.id, cl.account_no
-        ),
-        cogs_total AS (SELECT entry_id, SUM(amt) AS total FROM cogs_split GROUP BY entry_id)
-        INSERT INTO tag_distributions (cost_line_id, account_tag_id, percentage)
-        SELECT dl.id, t.id, ROUND(100.0 * cs.amt / ct.total, 4)
-        FROM cogs_split cs
-        JOIN cogs_total ct ON ct.entry_id = cs.entry_id
-        JOIN cost_lines dl ON dl.entry_id = cs.entry_id AND dl.account_no = '5010'
-        JOIN tag_groups g ON g.company_id = %s AND g.name = 'Product Line'
-        JOIN account_tags t ON t.tag_group_id = g.id AND t.reference =
-             CASE WHEN cs.account_no = '1330' THEN 'DRN-FG-600' ELSE 'CASE-FG-500' END
-        WHERE ct.total > 0
-        ON CONFLICT DO NOTHING
-        """,
-        (company_id, company_id),
-    )
-
-
-def refresh_source_tags(company_id: int) -> None:
-    """Keep the local analytic-tag overlay current when the reporting pages are
-    served from the GL. apply_auto_tags normally runs on the local read paths
-    (fetch_cost_ledger / fetch_analytics) that GL_READS bypasses; the mirror
-    then copies the fresh tags into the GL. Best-effort."""
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('tag_distributions') AS reg")
-            if cur.fetchone()["reg"] is not None:
-                apply_auto_tags(cur, company_id)
-        conn.commit()
-
-
-def fetch_cost_ledger(
-    order_no: str | None,
-    limit: int,
-    before_id: int | None = None,
-    event_type: str | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    company_id: int = 1,
-) -> dict:
-    date_from = _ledger_date(date_from, "dateFrom")
-    date_to = _ledger_date(date_to, "dateTo")
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            if not costing_ready(cur):
-                raise ValueError("Costing tables are not installed yet.")
-            cur.execute("SELECT to_regclass('tag_distributions') AS reg")
-            if cur.fetchone()["reg"] is not None:
-                apply_auto_tags(cur, company_id)
-                conn.commit()
-            clauses: list[str] = ["e.company_id = %s"]
-            params: list[object] = [company_id]
-            if order_no:
-                clauses.append("e.order_no = %s")
-                params.append(order_no)
-            if event_type:
-                clauses.append("e.event_type = %s")
-                params.append(event_type)
-            if date_from:
-                clauses.append("e.posted_at >= %s::date")
-                params.append(date_from)
-            if date_to:
-                clauses.append("e.posted_at < %s::date + 1")
-                params.append(date_to)
-            # Total matching the filters (paging cursor excluded) for
-            # "Showing X of N" in the journal browser.
-            filter_where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-            cur.execute(f"SELECT count(*) AS n FROM cost_entries e {filter_where}", params)
-            total = cur.fetchone()["n"]
-            if before_id is not None:
-                clauses.append("e.id < %s")
-                params.append(before_id)
-            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-            # Fetch one extra row to learn whether older entries remain.
-            params = params + [limit + 1]
-            cur.execute(
-                f"""
-                SELECT e.id, e.event_ref, e.order_no, e.event_type, e.memo, e.posted_at
-                FROM cost_entries e
-                {where}
-                ORDER BY e.id DESC
-                LIMIT %s
-                """,
-                params,
-            )
-            entries = cur.fetchall()
-            has_more = len(entries) > limit
-            entries = entries[:limit]
-            entry_ids = [entry["id"] for entry in entries]
-            lines_by_entry: dict[int, list] = {}
-            if entry_ids:
-                cur.execute(
-                    """
-                    SELECT l.id, l.entry_id, l.account_no, a.name AS account_name, l.debit, l.credit
-                    FROM cost_lines l
-                    JOIN gl_accounts a ON a.account_no = l.account_no AND a.company_id = l.company_id
-                    WHERE l.entry_id = ANY(%s)
-                    ORDER BY l.id
-                    """,
-                    (entry_ids,),
-                )
-                lines = cur.fetchall()
-                # Attach analytic tags to each line (report-only overlay).
-                tags_by_line: dict[int, list] = {}
-                line_ids = [row["id"] for row in lines]
-                if line_ids:
-                    cur.execute(
-                        """
-                        SELECT d.cost_line_id, g.name AS group_name, g.color, t.name AS tag_name,
-                               d.percentage
-                        FROM tag_distributions d
-                        JOIN account_tags t ON t.id = d.account_tag_id
-                        JOIN tag_groups g ON g.id = t.tag_group_id
-                        WHERE d.cost_line_id = ANY(%s)
-                        ORDER BY g.id, t.name
-                        """,
-                        (line_ids,),
-                    )
-                    for tag in cur.fetchall():
-                        tags_by_line.setdefault(tag["cost_line_id"], []).append({
-                            "group": tag["group_name"],
-                            "color": tag["color"],
-                            "name": tag["tag_name"],
-                            "percentage": float(tag["percentage"]),
-                        })
-                for line in lines:
-                    line["tags"] = tags_by_line.get(line["id"], [])
-                    lines_by_entry.setdefault(line["entry_id"], []).append(line)
-            for entry in entries:
-                entry["lines"] = lines_by_entry.get(entry["id"], [])
-            cur.execute(
-                "SELECT DISTINCT event_type FROM cost_entries WHERE company_id = %s ORDER BY event_type",
-                (company_id,),
-            )
-            event_types = [row["event_type"] for row in cur.fetchall()]
-    return {"entries": entries, "has_more": has_more, "total": total, "event_types": event_types}
 
 
 TB_NOTE = (
@@ -2941,103 +2730,6 @@ def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, f
     return expected_wip, case_expected, fg_expected, received_total
 
 
-def fetch_trial_balance(company_id=1) -> dict:
-    """Trial balance plus the control checks: balanced books, balanced
-    entries, GL-to-operations ties, and ledger immutability. Scoped to a
-    company; the physical-tie controls apply to the plant (company 1) only —
-    other companies have no floor, so those ties are vacuously satisfied."""
-    is_plant = company_id == 1
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            # Only the plant advances the physical simulation.
-            states = run_simulation_sync(cur) if is_plant else []
-            conn.commit()
-            costing = load_costing(cur)
-            if costing is None:
-                raise ValueError("Costing tables are not installed yet.")
-            balances = account_balances(cur, company_id)
-            total_debit = round(sum(row["total_debit"] for row in balances), 2)
-            total_credit = round(sum(row["total_credit"] for row in balances), 2)
-
-            cur.execute(
-                """
-                SELECT e.event_ref
-                FROM cost_entries e
-                JOIN cost_lines l ON l.entry_id = e.id
-                WHERE e.company_id = %s
-                GROUP BY e.id, e.event_ref
-                HAVING ABS(SUM(l.debit) - SUM(l.credit)) > 0.01
-                """,
-                (company_id,),
-            )
-            unbalanced = [row["event_ref"] for row in cur.fetchall()]
-
-            expected_wip = case_expected = fg_expected = received_total = 0.0
-            if is_plant:
-                expected_wip, case_expected, fg_expected, received_total = _plant_expected_values(
-                    cur, states, costing
-                )
-
-            cur.execute(
-                "SELECT tgname FROM pg_trigger WHERE tgname IN ('cost_entries_immutable', 'cost_lines_immutable')"
-            )
-            triggers = [row["tgname"] for row in cur.fetchall()]
-
-            def control(name, ok, detail):
-                return {"name": name, "ok": bool(ok), "detail": detail}
-
-            wip_gl = gl_balance(balances, WIP_ACCOUNT)
-            case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
-            fg_gl = gl_balance(balances, FG_ACCOUNT)
-            ap_gl = gl_balance(balances, AP_ACCOUNT)
-            controls = [
-                control(
-                    "Trial balance in balance",
-                    abs(total_debit - total_credit) <= 0.01,
-                    f"Total DR {total_debit:,.2f} vs CR {total_credit:,.2f}",
-                ),
-                control(
-                    "Every journal entry balances",
-                    not unbalanced,
-                    "All entries balanced" if not unbalanced else f"Unbalanced: {', '.join(unbalanced[:5])}",
-                ),
-                control(
-                    "GL WIP ties to shop-floor absorption",
-                    abs(wip_gl - expected_wip) <= 1,
-                    f"GL {wip_gl:,.2f} vs simulated absorption {expected_wip:,.2f}",
-                ),
-                control(
-                    "Case subassembly GL ties to case stock at standard",
-                    abs(case_gl - case_expected) <= 1,
-                    f"GL {case_gl:,.2f} vs stock less in-flight pulls {case_expected:,.2f}",
-                ),
-                control(
-                    "Finished goods GL ties to FG stock at standard",
-                    abs(fg_gl - fg_expected) <= 1,
-                    f"GL {fg_gl:,.2f} vs stock at standard {fg_expected:,.2f}",
-                ),
-                control(
-                    "Cost ledger immutability enforced",
-                    len(triggers) == 2,
-                    "UPDATE triggers active on cost_entries and cost_lines"
-                    if len(triggers) == 2
-                    else "Missing immutability trigger(s)",
-                ),
-                control(
-                    "Accounts Payable ties to received vendor POs",
-                    abs(ap_gl - received_total) <= 0.01,
-                    f"GL {ap_gl:,.2f} vs received PO total {received_total:,.2f}",
-                ),
-            ]
-    return {
-        "accounts": balances,
-        "total_debit": total_debit,
-        "total_credit": total_credit,
-        "controls": controls,
-        "note": TB_NOTE,
-    }
-
-
 def gl_trial_balance(company_id) -> dict:
     """The GL-backed trial balance (Phase 3b). Books and the three generic
     controls come from the onadapt-gl service; the four plant physical tie-outs
@@ -3056,7 +2748,8 @@ def gl_trial_balance(company_id) -> dict:
             if is_plant:
                 expected = _plant_expected_values(cur, states, costing)
 
-    gl_backed.sync_gl_now()  # make the GL fresh before reading its balances
+    # The engine posted every entry to the GL directly during run_simulation_sync,
+    # so the GL is already current — read it.
     gl = gl_backed.gl_get(f"/v1/trial-balance?company={company_id}")
     balances = gl["accounts"]
     total_debit = float(gl["total_debit"])
@@ -3089,78 +2782,6 @@ def gl_trial_balance(company_id) -> dict:
     ]
     return {"accounts": balances, "total_debit": total_debit, "total_credit": total_credit,
             "controls": controls, "note": TB_NOTE}
-
-
-def fetch_analytics(company_id: int = 1, group_name: str | None = None) -> dict:
-    """Analytic report: the books sliced by a chosen dimension. Per tag it
-    shows allocated debits/credits and net, plus a revenue/COGS/margin cut
-    (accounts 4000/5010) that lights up for the Product Line and Customer
-    dimensions. Report-only — reads tag_distributions, never the TB path."""
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('tag_groups') AS reg")
-            if cur.fetchone()["reg"] is None:
-                return {"groups": [], "group": None, "rows": [], "totals": {}}
-            apply_auto_tags(cur, company_id)
-            conn.commit()
-            cur.execute(
-                "SELECT id, name, color FROM tag_groups WHERE company_id = %s ORDER BY id",
-                (company_id,),
-            )
-            groups = cur.fetchall()
-            if not groups:
-                return {"groups": [], "group": None, "rows": [], "totals": {}}
-            chosen = next((g for g in groups if g["name"] == group_name), groups[0])
-
-            cur.execute(
-                """
-                SELECT t.name, t.reference,
-                       COALESCE(SUM(l.debit * d.percentage / 100), 0) AS alloc_debit,
-                       COALESCE(SUM(l.credit * d.percentage / 100), 0) AS alloc_credit,
-                       COALESCE(SUM(CASE WHEN l.account_no = '4000' THEN l.credit * d.percentage / 100 ELSE 0 END), 0) AS revenue,
-                       COALESCE(SUM(CASE WHEN l.account_no = '5010' THEN l.debit * d.percentage / 100 ELSE 0 END), 0) AS cogs,
-                       COUNT(DISTINCT l.id) AS lines
-                FROM account_tags t
-                LEFT JOIN tag_distributions d ON d.account_tag_id = t.id
-                LEFT JOIN cost_lines l ON l.id = d.cost_line_id AND l.company_id = t.company_id
-                WHERE t.tag_group_id = %s
-                GROUP BY t.id, t.name, t.reference
-                HAVING COUNT(DISTINCT l.id) > 0
-                ORDER BY t.name
-                """,
-                (chosen["id"],),
-            )
-            rows = []
-            tot = {"alloc_debit": 0.0, "alloc_credit": 0.0, "revenue": 0.0, "cogs": 0.0}
-            for row in cur.fetchall():
-                dr = round(float(row["alloc_debit"]), 2)
-                cr = round(float(row["alloc_credit"]), 2)
-                rev = round(float(row["revenue"]), 2)
-                cogs = round(float(row["cogs"]), 2)
-                rows.append({
-                    "name": row["name"],
-                    "reference": row["reference"],
-                    "alloc_debit": dr,
-                    "alloc_credit": cr,
-                    "net": round(dr - cr, 2),
-                    "revenue": rev,
-                    "cogs": cogs,
-                    "margin": round(rev - cogs, 2),
-                    "lines": row["lines"],
-                })
-                tot["alloc_debit"] += dr
-                tot["alloc_credit"] += cr
-                tot["revenue"] += rev
-                tot["cogs"] += cogs
-            totals = {
-                "alloc_debit": round(tot["alloc_debit"], 2),
-                "alloc_credit": round(tot["alloc_credit"], 2),
-                "net": round(tot["alloc_debit"] - tot["alloc_credit"], 2),
-                "revenue": round(tot["revenue"], 2),
-                "cogs": round(tot["cogs"], 2),
-                "margin": round(tot["revenue"] - tot["cogs"], 2),
-            }
-    return {"groups": groups, "group": chosen["name"], "rows": rows, "totals": totals}
 
 
 def fetch_costing_standards() -> dict:
@@ -3312,237 +2933,44 @@ def fetch_companies() -> dict:
 
 
 def fetch_gl_accounts(company_id=1) -> dict:
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            if not costing_ready(cur):
-                raise ValueError("Costing tables are not installed yet.")
-            cur.execute(
-                """
-                SELECT a.account_no, a.name, a.account_type, a.normal_side,
-                       COUNT(l.id) AS posting_count,
-                       COALESCE(SUM(l.debit), 0) AS total_debit,
-                       COALESCE(SUM(l.credit), 0) AS total_credit
-                FROM gl_accounts a
-                LEFT JOIN cost_lines l ON l.account_no = a.account_no AND l.company_id = a.company_id
-                WHERE a.company_id = %s
-                GROUP BY a.account_no, a.name, a.account_type, a.normal_side
-                ORDER BY a.account_no
-                """,
-                (company_id,),
-            )
-            accounts = []
-            for row in cur.fetchall():
-                debit = float(row["total_debit"])
-                credit = float(row["total_credit"])
-                balance = round(debit - credit, 2) if row["normal_side"] == "debit" else round(credit - debit, 2)
-                accounts.append({
-                    "account_no": row["account_no"],
-                    "name": row["name"],
-                    "account_type": row["account_type"],
-                    "normal_side": row["normal_side"],
-                    "posting_count": row["posting_count"],
-                    "balance": balance,
-                    # Engine-protected accounts are the plant's (company 1) only.
-                    "protected": company_id == 1 and row["account_no"] in PROTECTED_GL_ACCOUNTS,
-                })
-    return {"accounts": accounts, "account_types": list(GL_ACCOUNT_TYPES)}
+    """Chart of accounts with posting counts and balances — from the GL (the
+    system of record for the ledger)."""
+    return gl_backed.gl_get(f"/v1/accounts?company={int(company_id)}")
 
 
 def manage_gl_account(payload: dict) -> dict:
-    """Chart-of-accounts maintenance. Rules a controller would expect: names
-    are always editable; type and normal side lock once an account has
-    postings; engine accounts can't be deleted or restructured; deletes only
-    for unposted, unprotected accounts. Every change is audited."""
-    action = str(payload.get("action", "")).strip()
-    account_no = str(payload.get("accountNo", "")).strip()
-    actor = str(payload.get("actor", "")).strip() or "controller"
-    company_id = int(payload.get("companyId", 1) or 1)
-    if action not in ("create", "update", "delete"):
-        raise ValueError("action must be create, update, or delete.")
-    if not account_no or len(account_no) > 10 or not account_no.replace("-", "").isalnum():
-        raise ValueError("Account number must be 1-10 letters/digits.")
-    is_protected = company_id == 1 and account_no in PROTECTED_GL_ACCOUNTS
-
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT a.account_no, a.name, a.account_type, a.normal_side,
-                       (SELECT COUNT(*) FROM cost_lines l
-                        WHERE l.account_no = a.account_no AND l.company_id = a.company_id) AS postings
-                FROM gl_accounts a WHERE a.account_no = %s AND a.company_id = %s
-                """,
-                (account_no, company_id),
-            )
-            existing = cur.fetchone()
-
-            def audit(field, old, new):
-                cur.execute(
-                    """
-                    INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value)
-                    VALUES (%s, 'gl_account', %s, %s, %s, %s)
-                    """,
-                    (actor, account_no, field, old, new),
-                )
-
-            if action == "create":
-                if existing:
-                    raise ValueError(f"Account {account_no} already exists.")
-                name = str(payload.get("name", "")).strip()
-                account_type = str(payload.get("accountType", "")).strip()
-                normal_side = str(payload.get("normalSide", "")).strip()
-                if not name or len(name) > 80:
-                    raise ValueError("Account name is required (max 80 chars).")
-                if account_type not in GL_ACCOUNT_TYPES:
-                    raise ValueError(f"accountType must be one of {', '.join(GL_ACCOUNT_TYPES)}.")
-                if normal_side not in ("debit", "credit"):
-                    raise ValueError("normalSide must be debit or credit.")
-                cur.execute(
-                    "INSERT INTO gl_accounts (account_no, name, account_type, normal_side, company_id) VALUES (%s, %s, %s, %s, %s)",
-                    (account_no, name, account_type, normal_side, company_id),
-                )
-                audit("created", None, f"{name} ({account_type}/{normal_side})")
-
-            elif action == "update":
-                if not existing:
-                    raise ValueError(f"Unknown account {account_no}.")
-                locked = existing["postings"] > 0 or is_protected
-                name = str(payload.get("name", "")).strip()
-                account_type = str(payload.get("accountType", existing["account_type"])).strip()
-                normal_side = str(payload.get("normalSide", existing["normal_side"])).strip()
-                if not name or len(name) > 80:
-                    raise ValueError("Account name is required (max 80 chars).")
-                if account_type not in GL_ACCOUNT_TYPES:
-                    raise ValueError(f"accountType must be one of {', '.join(GL_ACCOUNT_TYPES)}.")
-                if normal_side not in ("debit", "credit"):
-                    raise ValueError("normalSide must be debit or credit.")
-                if locked and (account_type != existing["account_type"] or normal_side != existing["normal_side"]):
-                    raise ValueError(
-                        "Type and normal side are locked: the account has postings or is used by the "
-                        "posting engine. Only the name can change."
-                    )
-                if name != existing["name"]:
-                    audit("name", existing["name"], name)
-                if account_type != existing["account_type"]:
-                    audit("account_type", existing["account_type"], account_type)
-                if normal_side != existing["normal_side"]:
-                    audit("normal_side", existing["normal_side"], normal_side)
-                cur.execute(
-                    "UPDATE gl_accounts SET name = %s, account_type = %s, normal_side = %s WHERE account_no = %s AND company_id = %s",
-                    (name, account_type, normal_side, account_no, company_id),
-                )
-
-            else:  # delete
-                if not existing:
-                    raise ValueError(f"Unknown account {account_no}.")
-                if is_protected:
-                    raise ValueError("That account is used by the posting engine and cannot be deleted.")
-                if existing["postings"] > 0:
-                    raise ValueError("Accounts with postings cannot be deleted (the ledger is immutable).")
-                cur.execute("DELETE FROM gl_accounts WHERE account_no = %s AND company_id = %s", (account_no, company_id))
-                audit("deleted", f"{existing['name']} ({existing['account_type']}/{existing['normal_side']})", None)
-
-        conn.commit()
-    return {"action": action, "accountNo": account_no, "actor": actor}
+    """Chart-of-accounts maintenance — proxied to the GL, which enforces the
+    controller rules (name always editable; type/normal side lock once posted
+    or protected; protected accounts can't be deleted/restructured)."""
+    return gl_backed.gl_post("/v1/accounts", {
+        "company": payload.get("companyId", 1),
+        "action": payload.get("action", ""),
+        "accountNo": payload.get("accountNo", ""),
+        "name": payload.get("name", ""),
+        "accountType": payload.get("accountType", ""),
+        "normalSide": payload.get("normalSide", ""),
+    })
 
 
 def create_manual_entry(payload: dict) -> dict:
-    """Post a balanced manual journal entry to a NON-PLANT company's books.
-    The plant (company 1) is engine-posted only, so manual entries are
-    rejected for it — that keeps its tie-out controls intact. Posts to the
-    same immutable ledger; corrections are made by reversal, not edits."""
-    company_id = int(payload.get("companyId", 0) or 0)
-    if company_id == 1:
-        raise ValueError(
-            "The Manufacturing Plant's books are engine-posted; manual entries "
-            "are only for other companies (switch companies first)."
-        )
-    memo = str(payload.get("memo", "")).strip()
-    if not memo or len(memo) > 200:
-        raise ValueError("A memo is required (max 200 chars).")
-
-    lines = []
-    for raw in payload.get("lines") or []:
-        acct = str(raw.get("accountNo", "")).strip()
-        if not acct:
-            continue
-        debit = round(float(raw.get("debit") or 0), 2)
-        credit = round(float(raw.get("credit") or 0), 2)
-        if debit < 0 or credit < 0:
-            raise ValueError("Amounts cannot be negative.")
-        if (debit > 0) == (credit > 0):
-            raise ValueError(f"Each line is either a debit or a credit — check account {acct}.")
-        lines.append((acct, debit, credit))
-    if len(lines) < 2:
-        raise ValueError("A journal entry needs at least two lines.")
-    total_debit = round(sum(d for _, d, _ in lines), 2)
-    total_credit = round(sum(c for _, _, c in lines), 2)
-    if total_debit <= 0:
-        raise ValueError("Entry total must be greater than zero.")
-    if abs(total_debit - total_credit) > 0.005:
-        raise ValueError(f"Out of balance: debits {total_debit:,.2f} vs credits {total_credit:,.2f}.")
-
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name FROM companies WHERE id = %s", (company_id,))
-            company = cur.fetchone()
-            if not company:
-                raise ValueError("Unknown company.")
-            cur.execute("SELECT account_no FROM gl_accounts WHERE company_id = %s", (company_id,))
-            valid = {row["account_no"] for row in cur.fetchall()}
-            for acct, _, _ in lines:
-                if acct not in valid:
-                    raise ValueError(f"Account {acct} is not in this company's chart of accounts.")
-            event_ref = _next_manual_ref(cur, company_id)
-            if not post_cost_entry(cur, event_ref, None, event_ref, "manual", memo, lines, company_id):
-                raise ValueError("Entry could not be posted (duplicate reference).")
-        conn.commit()
-    return {"eventRef": event_ref, "company": company["name"],
-            "totalDebit": total_debit, "lines": len(lines)}
-
-
-def _next_manual_ref(cur, company_id: int) -> str:
-    cur.execute(
-        """
-        SELECT COALESCE(MAX(substring(event_ref FROM '[0-9]+$')::int), 0) + 1 AS n
-        FROM cost_entries WHERE company_id = %s AND event_ref LIKE %s
-        """,
-        (company_id, f"MJE-{company_id}-%"),
-    )
-    return f"MJE-{company_id}-{cur.fetchone()['n']}"
+    """Post a manual journal entry to a non-plant company's books — proxied to
+    the GL, which validates (memo, >=2 lines, debit XOR credit, accounts in the
+    chart, balanced, total>0), generates the MJE reference, and rejects the
+    engine-posted plant."""
+    return gl_backed.gl_post("/v1/journal-entries", {
+        "company": payload.get("companyId"),
+        "memo": payload.get("memo", ""),
+        "lines": payload.get("lines") or [],
+    })
 
 
 def reverse_manual_entry(payload: dict) -> dict:
-    """Reverse a manual entry by posting its mirror (debits/credits swapped).
-    The ledger is immutable, so this is how a mistake is corrected."""
-    company_id = int(payload.get("companyId", 0) or 0)
-    event_ref = str(payload.get("eventRef", "")).strip()
-    if company_id == 1:
-        raise ValueError("The plant's books are engine-posted; nothing to reverse here.")
-    if not event_ref.startswith("MJE-"):
-        raise ValueError("Only manual journal entries can be reversed.")
-    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, memo FROM cost_entries WHERE event_ref = %s AND company_id = %s",
-                (event_ref, company_id),
-            )
-            original = cur.fetchone()
-            if not original:
-                raise ValueError(f"Unknown entry {event_ref}.")
-            cur.execute(
-                "SELECT account_no, debit, credit FROM cost_lines WHERE entry_id = %s ORDER BY id",
-                (original["id"],),
-            )
-            # Swap debit and credit on every line.
-            lines = [(r["account_no"], float(r["credit"]), float(r["debit"])) for r in cur.fetchall()]
-            new_ref = _next_manual_ref(cur, company_id)
-            post_cost_entry(
-                cur, new_ref, None, new_ref, "manual_reversal",
-                f"Reversal of {event_ref}: {original['memo']}", lines, company_id,
-            )
-        conn.commit()
-    return {"eventRef": new_ref, "reversed": event_ref}
+    """Reverse a manual entry (post its mirror, debits/credits swapped) — proxied
+    to the GL, whose ledger is immutable."""
+    return gl_backed.gl_post("/v1/journal-entries/reverse", {
+        "company": payload.get("companyId"),
+        "eventRef": payload.get("eventRef", ""),
+    })
 
 
 # ===== Sales: customers, sales orders, ship & invoice =====
@@ -4090,15 +3518,7 @@ def fetch_purchasing() -> dict:
                 po["lines"] = lines
                 po["total"] = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
 
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(l.credit), 0) AS credit, COALESCE(SUM(l.debit), 0) AS debit
-                FROM cost_lines l WHERE l.account_no = %s
-                """,
-                (AP_ACCOUNT,),
-            )
-            ap = cur.fetchone()
-            ap_balance = round(float(ap["credit"]) - float(ap["debit"]), 2)
+    ap_balance = gl_backed.account_balance(1, AP_ACCOUNT)
 
     return {
         "settings": settings,
@@ -4887,14 +4307,8 @@ def intake_worker() -> None:
                 last_poll=datetime.now(timezone.utc).isoformat(),
                 last_error=_mailbox_error_text(exc),
             )
-        # Propagate any headless postings (sim advance, backorders) to the GL as
-        # journal entries, so the shared books stay current without a page open.
-        try:
-            if gl_backed.enabled():
-                refresh_source_tags(1)
-                gl_backed.push_best_effort()
-        except Exception:
-            pass
+        # (The engine posts every entry to the GL directly at compute time, so
+        # there's nothing to propagate here.)
         time.sleep(INTAKE_POLL_SECONDS)
 
 
@@ -5029,26 +4443,36 @@ def audit_assert(assertions: list, check_id: str, description: str, expected, ac
 
 
 def build_audit_package() -> dict:
-    """The full audit evidence package, self-describing and machine-checkable."""
-    tb = fetch_trial_balance()  # also drives the simulation sync
+    """The full audit evidence package, self-describing and machine-checkable.
+    The ledger (entries, per-entry footings, non-routine journals) is read from
+    the shared GL — the system of record — via its /v1 API."""
+    tb = gl_trial_balance(1)  # also drives the simulation sync
     cards = fetch_cost_cards()["cards"]
     variances = fetch_variance_report()
+
+    gl_entries = gl_backed.all_entries(1)
+    entries = [
+        {
+            "event_ref": e["event_ref"], "event_type": e["event_type"],
+            "order_no": e.get("reference"), "posted_at": e["posted_at"],
+            "debits": round(sum(float(l["debit"]) for l in e["lines"]), 2),
+            "credits": round(sum(float(l["credit"]) for l in e["lines"]), 2),
+        }
+        for e in gl_entries
+    ]
+    non_routine = [
+        {
+            "event_ref": e["event_ref"], "event_type": e["event_type"], "memo": e["memo"],
+            "account_no": l["account_no"], "debit": l["debit"], "credit": l["credit"],
+        }
+        for e in gl_entries if e["event_type"] in ("opening", "revaluation", "adjustment")
+        for l in e["lines"]
+    ]
 
     with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if not costing_ready(cur):
                 raise ValueError("Costing tables are not installed yet.")
-            cur.execute(
-                """
-                SELECT e.event_ref, e.event_type, e.order_no, e.posted_at,
-                       COALESCE(SUM(l.debit), 0) AS debits, COALESCE(SUM(l.credit), 0) AS credits
-                FROM cost_entries e
-                LEFT JOIN cost_lines l ON l.entry_id = e.id
-                GROUP BY e.id, e.event_ref, e.event_type, e.order_no, e.posted_at
-                ORDER BY e.id
-                """
-            )
-            entries = cur.fetchall()
             cur.execute("SELECT part_number, standard_cost, actual_cost FROM standard_costs ORDER BY part_number")
             material_standards = cur.fetchall()
             cur.execute("SELECT role, standard_rate, actual_rate FROM labor_rates ORDER BY role")
@@ -5060,16 +4484,6 @@ def build_audit_package() -> dict:
                 """
             )
             standards_audit = cur.fetchall()
-            cur.execute(
-                """
-                SELECT e.event_ref, e.event_type, e.memo, l.account_no, l.debit, l.credit
-                FROM cost_entries e
-                JOIN cost_lines l ON l.entry_id = e.id
-                WHERE e.event_type IN ('opening', 'revaluation', 'adjustment')
-                ORDER BY e.id, l.id
-                """
-            )
-            non_routine = cur.fetchall()
             cur.execute(
                 """
                 SELECT part_number, SUM(quantity_on_hand) AS on_hand
@@ -5584,7 +4998,7 @@ AGENT_EXECUTORS = {
     "check_kit": lambda args: kit_check(str(args.get("finishedSku", "")), int(args.get("quantity", 1))),
     "get_order": lambda args: _agent_trim_order(fetch_order_snapshot(str(args.get("orderNo", "")).strip())),
     "get_cost_card": _agent_exec_get_cost_card,
-    "get_trial_balance": lambda args: fetch_trial_balance(),
+    "get_trial_balance": lambda args: gl_trial_balance(1),
     "get_variance_report": lambda args: fetch_variance_report(),
     "get_wip_valuation": lambda args: fetch_costing_wip(),
     "get_standards": lambda args: fetch_costing_standards(),
@@ -6176,16 +5590,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 if path == "/api/companies":
                     payload = fetch_companies()
                 elif path == "/api/analytics":
-                    group_name = query.get("group", [None])[0]
-                    if gl_backed.enabled():
-                        try:
-                            refresh_source_tags(company)
-                            gl_backed.push_best_effort()
-                            payload = gl_backed.analytics(company, group_name)
-                        except Exception:
-                            payload = fetch_analytics(company, group_name)
-                    else:
-                        payload = fetch_analytics(company, group_name)
+                    payload = gl_backed.analytics(company, query.get("group", [None])[0])
                 elif path == "/api/costing/cost-cards":
                     payload = fetch_cost_cards()
                 elif path == "/api/costing/wip":
@@ -6193,39 +5598,18 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 elif path == "/api/costing/variances":
                     payload = fetch_variance_report()
                 elif path == "/api/costing/ledger":
-                    order_no = query.get("orderNo", [None])[0]
-                    limit = min(max(int(query.get("limit", ["30"])[0]), 1), 200)
                     before_raw = query.get("beforeId", [None])[0]
-                    before_id = int(before_raw) if before_raw else None
-                    event_type = query.get("eventType", [None])[0]
-                    date_from = query.get("dateFrom", [None])[0]
-                    date_to = query.get("dateTo", [None])[0]
-                    if gl_backed.enabled():
-                        try:
-                            refresh_source_tags(company)
-                            gl_backed.push_best_effort()
-                            payload = gl_backed.ledger(
-                                company, order_no=order_no, limit=limit, before_id=before_id,
-                                event_type=event_type, date_from=date_from, date_to=date_to,
-                            )
-                        except Exception:
-                            payload = fetch_cost_ledger(
-                                order_no, limit, before_id=before_id, event_type=event_type,
-                                date_from=date_from, date_to=date_to, company_id=company,
-                            )
-                    else:
-                        payload = fetch_cost_ledger(
-                            order_no, limit, before_id=before_id, event_type=event_type,
-                            date_from=date_from, date_to=date_to, company_id=company,
-                        )
+                    payload = gl_backed.ledger(
+                        company,
+                        order_no=query.get("orderNo", [None])[0],
+                        limit=min(max(int(query.get("limit", ["30"])[0]), 1), 200),
+                        before_id=int(before_raw) if before_raw else None,
+                        event_type=query.get("eventType", [None])[0],
+                        date_from=query.get("dateFrom", [None])[0],
+                        date_to=query.get("dateTo", [None])[0],
+                    )
                 elif path == "/api/costing/trial-balance":
-                    if gl_backed.enabled():
-                        try:
-                            payload = gl_trial_balance(company)
-                        except Exception:
-                            payload = fetch_trial_balance(company)
-                    else:
-                        payload = fetch_trial_balance(company)
+                    payload = gl_trial_balance(company)
                 elif path == "/api/costing/accounts":
                     payload = fetch_gl_accounts(company)
                 elif path == "/api/sales":
@@ -6336,14 +5720,10 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, manage_gl_account(payload))
                 return
             if path == "/api/journal-entry":
-                result = create_manual_entry(payload)
-                gl_backed.push_best_effort()  # dual-write: mirror the entry to the GL now
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, create_manual_entry(payload))
                 return
             if path == "/api/journal-entry/reverse":
-                result = reverse_manual_entry(payload)
-                gl_backed.push_best_effort()
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, reverse_manual_entry(payload))
                 return
             if path == "/api/sales/customer":
                 json_response(self, HTTPStatus.OK, manage_customer(payload))
@@ -6352,9 +5732,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, create_sales_order(payload))
                 return
             if path == "/api/sales/invoice":
-                result = ship_and_invoice(payload)
-                gl_backed.push_best_effort()  # dual-write: revenue/COGS to the GL now
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, ship_and_invoice(payload))
                 return
             if path == "/api/purchasing/vendor":
                 json_response(self, HTTPStatus.OK, manage_vendor(payload))
@@ -6372,9 +5750,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, create_vendor_po(payload))
                 return
             if path == "/api/purchasing/receive":
-                result = receive_vendor_po(payload)
-                gl_backed.push_best_effort()  # dual-write: RM/AP to the GL now
-                json_response(self, HTTPStatus.OK, result)
+                json_response(self, HTTPStatus.OK, receive_vendor_po(payload))
                 return
             if path == "/api/intake/email":
                 json_response(self, HTTPStatus.OK, submit_test_email(payload))

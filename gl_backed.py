@@ -14,6 +14,7 @@ Config comes from the environment (set in drones.env):
 """
 import json
 import os
+import urllib.error
 import urllib.request
 from urllib.parse import quote
 
@@ -36,80 +37,29 @@ def gl_post(path: str, body: dict) -> dict:
         headers={"Authorization": f"Bearer {GL_API_KEY}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        result = json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        # Surface the GL's validation message as ValueError so endpoints return 400.
+        try:
+            message = json.load(exc).get("error") or f"GL error {exc.code}"
+        except Exception:
+            message = f"GL error {exc.code}"
+        raise ValueError(message)
     if isinstance(result, dict) and result.get("error"):
-        raise RuntimeError(result["error"])
+        raise ValueError(result["error"])
     return result
 
 
-def post_pending() -> None:
-    """Post every local ledger entry the GL doesn't yet hold as a real balanced
-    journal entry via POST /v1/journal-entries (idempotent by ref, so retries
-    and overlaps are safe). This is how Manufacturing writes to the GL. The
-    analytic tag overlay is a separate report-only layer synced by the GL-side
-    mirror, not part of the journal, so it isn't posted here. Raises on failure
-    so read-time callers fall back to the local ledger; the write path uses
-    push_best_effort() which swallows."""
-    if not enabled() or not LOCAL_DATABASE_URL:
-        return
-    with psycopg.connect(LOCAL_DATABASE_URL, row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT company_id FROM cost_entries")
-            for cid in sorted(r["company_id"] for r in cur.fetchall()):
-                have = set(gl_get(f"/v1/journal-entries/refs?company={cid}").get("refs", []))
-                cur.execute(
-                    "SELECT id, event_ref, event_type, order_no, memo FROM cost_entries "
-                    "WHERE company_id = %s ORDER BY id",
-                    (cid,),
-                )
-                pending = [e for e in cur.fetchall() if e["event_ref"] not in have]
-                for entry in pending:
-                    cur.execute(
-                        "SELECT account_no, debit, credit FROM cost_lines "
-                        "WHERE entry_id = %s ORDER BY id",
-                        (entry["id"],),
-                    )
-                    lines = [
-                        {"account": l["account_no"], "debit": float(l["debit"]), "credit": float(l["credit"])}
-                        for l in cur.fetchall()
-                    ]
-                    gl_post("/v1/journal-entries", {
-                        "company": cid, "ref": entry["event_ref"], "type": entry["event_type"],
-                        "reference": entry["order_no"], "memo": entry["memo"],
-                        "source": "manufacturing", "lines": lines,
-                    })
-
-
-def sync_gl_now() -> None:
-    """Post pending local entries to the GL now so a GL-backed read is fresh.
-    Raises on failure so the caller falls back to the local ledger."""
-    post_pending()
-
-
-def push_best_effort() -> None:
-    """Dual-write: after a local ledger write, post it to the GL right away.
-    Never raises — the local write already succeeded and the next read/worker
-    cycle catches up. Only runs when reads are on the GL."""
-    if not enabled():
-        return
-    try:
-        post_pending()
-    except Exception:
-        pass
-
-
 def reset_gl() -> None:
-    """Reflect a dev-mode local purge in the GL: clear the tenant's journal via
-    POST /v1/reset (chart/companies persist), then re-post the fresh source. A
-    purge can't be conveyed by posting, so the clear goes whenever the GL is
-    configured. Best-effort."""
+    """A dev-mode reset clears the tenant's journal via POST /v1/reset
+    (chart/companies persist). The engine re-posts the opening balance and new
+    entries on the next simulation tick. Best-effort."""
     if not (GL_BASE_URL and GL_API_KEY):
         return
     try:
         gl_post("/v1/reset", {})
-        if enabled():
-            post_pending()
     except Exception:
         pass
 
@@ -123,6 +73,74 @@ def gl_get(path: str) -> dict:
     if isinstance(data, dict) and data.get("error"):
         raise RuntimeError(data["error"])
     return data
+
+
+# ===== GL ledger adapter (Stage 1 of the GL-only refactor) =====
+# The engine-facing operations that replace the local cost_entries/cost_lines
+# ledger: post an entry, learn which refs are already posted (idempotency), read
+# an account balance, and read an account's net across one document reference
+# (for relieving WIP to exactly what an order absorbed). All go over the /v1 API.
+
+def posted_refs(company_id) -> set:
+    """The event_refs already in the GL for a company — the engine's idempotency
+    check (replaces `SELECT event_ref FROM cost_entries ...`)."""
+    return set(gl_get(f"/v1/journal-entries/refs?company={int(company_id)}").get("refs", []))
+
+
+def post_entry(company_id, ref, event_type, memo, lines, reference=None) -> bool:
+    """Post one balanced entry to the GL as a journal entry. `lines` is the
+    engine's (account, debit, credit) tuple list. Returns True if newly posted,
+    False if the ref already existed (idempotent). Replaces post_cost_entry's
+    local INSERTs."""
+    result = gl_post("/v1/journal-entries", {
+        "company": int(company_id), "ref": ref, "type": event_type,
+        "reference": reference, "memo": memo, "source": "manufacturing",
+        "lines": [{"account": account, "debit": round(debit, 2), "credit": round(credit, 2)}
+                  for account, debit, credit in lines],
+    })
+    return not result.get("duplicate", False)
+
+
+def account_balance(company_id, account_no) -> float:
+    """A single account's normal-side balance from the GL."""
+    data = gl_get(f"/v1/balances?company={int(company_id)}")
+    for row in data.get("accounts", []):
+        if row["account_no"] == account_no:
+            return float(row["balance"])
+    return 0.0
+
+
+def reference_net(company_id, reference, account_no) -> float:
+    """Net (debit - credit) of an account across every entry carrying a document
+    reference — used to relieve WIP to exactly what an order absorbed, even if a
+    standard changed mid-flight (replaces the cost_lines WIP read)."""
+    data = gl_get(
+        f"/v1/journal-entries?company={int(company_id)}"
+        f"&reference={quote(str(reference))}&limit=200"
+    )
+    total = 0.0
+    for entry in data.get("entries", []):
+        for line in entry.get("lines", []):
+            if line["account_no"] == account_no:
+                total += float(line["debit"]) - float(line["credit"])
+    return round(total, 2)
+
+
+def all_entries(company_id) -> list:
+    """Every journal entry for a company (keyset-paged), with lines — for the
+    audit package, which tests 100% of the ledger."""
+    entries, before = [], None
+    while True:
+        path = f"/v1/journal-entries?company={int(company_id)}&limit=200"
+        if before:
+            path += f"&beforeId={before}"
+        data = gl_get(path)
+        batch = data.get("entries", [])
+        entries.extend(batch)
+        if not data.get("has_more") or not batch:
+            break
+        before = batch[-1]["id"]
+    return entries
 
 
 def ledger(company_id, *, order_no=None, limit=30, before_id=None, event_type=None,
