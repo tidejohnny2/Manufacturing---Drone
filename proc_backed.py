@@ -13,7 +13,7 @@ Reads are gated by PROC_READS, writes by PROC_WRITES; when a flag is off the
 caller keeps its own local path (usable only while the local tables still
 exist — after the Phase-4c drop the flags stay on).
 
-Config (drones.env):
+Config (manufacturing.env):
     PROC_BASE_URL   e.g. http://127.0.0.1:8799
     PROC_API_KEY    the manufacturing tenant's bearer key
     PROC_READS      "1" to serve reads from the service

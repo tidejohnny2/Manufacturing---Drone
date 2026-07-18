@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily internal audit certification for the drone plant
+Description=Daily internal audit certification for the manufacturing plant
 
 [Timer]
 OnCalendar=*-*-* 06:00:00 UTC
