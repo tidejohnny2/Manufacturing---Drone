@@ -712,6 +712,62 @@ def post_completion_inventory(cur, order: dict, final_zone_id: str) -> None:
         )
 
 
+def ensure_pulls_allocated(cur, order: dict) -> bool:
+    """Gate completion on subassembly allocation. A manufactured order (e.g. a
+    drone) can only complete once its inventory-pull subassemblies (the transport
+    case) are allocated from stock — allocate any that are now available. Returns
+    False if any pull is still short, so the caller leaves the order in flight
+    rather than finishing it without physically consuming the case: the
+    standard-cost GL already credited the subassembly at dm_issue, so a
+    short-completed order would permanently desync case stock from account 1315.
+    While the order waits, its case stays covered by case_in_transit, so the
+    tie-out holds."""
+    cur.execute(
+        """
+        SELECT pom.id, pom.part_number, pom.required_quantity, pom.unit, bi.source_zone_id
+        FROM production_order_materials pom
+        JOIN bom_items bi ON bi.id = pom.bom_item_id
+        WHERE pom.production_order_id = %s
+          AND bi.source_zone_id IS NOT NULL
+          AND pom.status = 'short'
+        """,
+        (order["id"],),
+    )
+    for pull in cur.fetchall():
+        cur.execute(
+            "SELECT quantity_available FROM inventory_items "
+            "WHERE location_zone_id = %s AND part_number = %s",
+            (pull["source_zone_id"], pull["part_number"]),
+        )
+        row = cur.fetchone()
+        if not row or row["quantity_available"] < pull["required_quantity"]:
+            return False  # still short -> block completion; retries next poll
+        cur.execute(
+            """
+            UPDATE inventory_items
+            SET quantity_allocated = quantity_allocated + %s, updated_at = now()
+            WHERE location_zone_id = %s AND part_number = %s
+            """,
+            (pull["required_quantity"], pull["source_zone_id"], pull["part_number"]),
+        )
+        cur.execute(
+            "UPDATE production_order_materials SET status = 'allocated' WHERE id = %s",
+            (pull["id"],),
+        )
+        cur.execute(
+            """
+            INSERT INTO inventory_transactions (
+              production_order_id, transaction_type, from_zone_id, part_number,
+              quantity, unit, reference
+            )
+            VALUES (%s, 'allocate', %s, %s, %s, %s, %s)
+            """,
+            (order["id"], pull["source_zone_id"], pull["part_number"],
+             pull["required_quantity"], pull["unit"], order["order_no"]),
+        )
+    return True
+
+
 def complete_finished_pipeline_orders(cur, active_states: list[dict]) -> None:
     # Standard costing keeps pace with production: DM issues and station
     # conversion post for in-flight orders on every poll, and completion
@@ -720,6 +776,11 @@ def complete_finished_pipeline_orders(cur, active_states: list[dict]) -> None:
     for state in active_states:
         order = state["order"]
         if order["production_status"] == "complete":
+            # A drone can't finish until its transport case is allocated; if the
+            # case is still short, leave the order in flight (its case stays in
+            # case_in_transit) rather than desyncing stock from the GL.
+            if not ensure_pulls_allocated(cur, order):
+                continue
             final_zone_id = state["balances"][-1]["zone_id"]
             cur.execute(
                 """
