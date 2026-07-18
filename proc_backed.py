@@ -99,17 +99,15 @@ def vendors() -> list:
 
 def catalog() -> list:
     """Sourcing catalog, shaped like the local read: vendor-name join, lead-time
-    coalesce, break-key rename, planner ordering. The offer `id` is remapped to
-    the LOCAL vendor_parts id (natural key vendor_id+part_number) so the still-
-    local 'Prefer' write stays correct."""
+    coalesce, break-key rename, planner ordering. Returns the SERVICE offer id
+    (Phase 4c: local is gone, so the Prefer write uses service ids natively)."""
     vmap = _vendor_map()
-    local_ids = _local_offer_ids()
     out = []
     for o in proc_get("/v1/vendor-parts").get("vendorParts", []):
         vendor = vmap.get(o["vendor_id"], {})
         lead = o["lead_time_days"] if o.get("lead_time_days") is not None else vendor.get("lead_time_days", 7)
         out.append({
-            "id": local_ids.get((o["vendor_id"], o["part_number"]), o["id"]),
+            "id": o["id"],
             "vendor_id": o["vendor_id"], "vendor": vendor.get("name", ""),
             "part_number": o["part_number"], "vendor_model": o["vendor_model"],
             "description": o["description"], "unit_price": float(o["unit_price"]),
@@ -122,15 +120,14 @@ def catalog() -> list:
 
 
 def purchase_orders() -> list:
-    """PO register, shaped like the local pos read (id remapped to the LOCAL po id
-    via po_no; ordered id desc, capped at 40)."""
+    """PO register, shaped like the local pos read; returns SERVICE po ids
+    (Phase 4c). Ordered id desc, capped at 40."""
     vmap = _vendor_map()
-    local_ids = _local_po_ids()
     out = []
     for po in proc_get("/v1/purchase-orders?company=1").get("purchaseOrders", []):
         vendor = vmap.get(po["vendor_id"], {})
         out.append({
-            "id": local_ids.get(po["po_no"], po["id"]),
+            "id": po["id"],
             "po_no": po["po_no"], "status": po["status"],
             "created_at": po["created_at"], "received_at": po["received_at"],
             "vendor": vendor.get("name", ""), "vendor_code": vendor.get("account_code"),
