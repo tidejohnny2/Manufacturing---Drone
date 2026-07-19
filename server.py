@@ -4025,19 +4025,17 @@ def receive_vendor_po(payload: dict) -> dict:
             total = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
             vendor_ref = f"{po['vendor_code']} {po['vendor']}" if po.get("vendor_code") else po["vendor"]
             if proc_backed.writes_enabled():
-                # Phase 4b: auto-invoice at receive. The service posts DR inventory /
-                # CR GR-IR then DR GR-IR / CR AP to the GL (net DR RM / CR AP) under the
-                # manufacturing tenant's books and emits receipt.posted; the local RM/AP
-                # post is skipped (no double-post). Bins fill via fill_bins_once keyed on
-                # the service receipt no, so the echoed webhook — and any retry — is a
-                # no-op (filled exactly once, whichever side gets there first). push_receive
-                # raises on failure -> the local receive rolls back for a clean retry.
-                receipt_no = proc_backed.push_receive(
+                # Phase 4b: auto-invoice at receive; ERP Phase D: the SERVICE fills the
+                # shared inv module's bins in the receipt's own transaction (receipt +
+                # GL journal + bin fill are atomic in one database), so nothing fills
+                # locally and the old webhook echo path is retired. push_receive raises
+                # on failure -> this receive fails cleanly for a retry.
+                receipt = proc_backed.push_receive(
                     po_no,
                     [{"partNumber": l["part_number"], "quantity": l["quantity"],
                       "unitPrice": float(l["unit_price"])} for l in lines],
                 )
-                repriced = fill_bins_once(cur, receipt_no, lines, po_no)["repriced"] if receipt_no else []
+                repriced = (receipt or {}).get("repriced", [])
             else:
                 repriced = _fill_bins(cur, lines, po_no)
                 post_cost_entry(
