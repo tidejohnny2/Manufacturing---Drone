@@ -10,7 +10,7 @@
     ["neutral", "Neutral", "#475569"],
     ["light", "Light", "#2563eb"]
   ];
-  const STORAGE_KEY = "drones-ui-theme";
+  const STORAGE_KEY = "manufacturing-ui-theme";
   let saved = "ms-blue";
   try {
     saved = localStorage.getItem(STORAGE_KEY) || "ms-blue";

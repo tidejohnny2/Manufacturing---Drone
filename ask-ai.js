@@ -49,7 +49,7 @@
   const form = panel.querySelector("#askForm");
   const input = panel.querySelector("#askInput");
   const statusDot = panel.querySelector("#askStatus");
-  let sessionId = sessionStorage.getItem("drones-ask-session") || "";
+  let sessionId = sessionStorage.getItem("manufacturing-ask-session") || "";
 
   window.toggleAskAI = function () {
     panel.classList.toggle("open");
@@ -157,7 +157,7 @@
   function handleResponse(data) {
     if (data.session_id) {
       sessionId = data.session_id;
-      sessionStorage.setItem("drones-ask-session", sessionId);
+      sessionStorage.setItem("manufacturing-ask-session", sessionId);
     }
     if (data.results?.length) {
       const lines = data.results

@@ -1,7 +1,7 @@
 // Shared company switcher for the multi-company accounting pages. The active
 // company is stored in localStorage and sent as ?company=N on every scoped
 // API call; changing it reloads the page. Company 1 is the Manufacturing Plant.
-const COMPANY_KEY = "drones-company";
+const COMPANY_KEY = "manufacturing-company";
 
 function companyId() {
   try {
