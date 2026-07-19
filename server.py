@@ -2743,7 +2743,7 @@ TB_NOTE = (
 )
 
 
-def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, float]:
+def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, float, float]:
     """The plant-floor figures the physical tie-out controls compare the ledger
     against: expected WIP absorption, case/FG stock at standard, and the
     received-PO total. Independent of which ledger holds the balances, so both
@@ -2797,7 +2797,13 @@ def _plant_expected_values(cur, states, costing) -> tuple[float, float, float, f
             """
         )
         received_total = round(float(cur.fetchone()["total"]), 2)
-    return expected_wip, case_expected, fg_expected, received_total
+    # AR module: open invoices (invoiced less cash-received) tie to GL 1200.
+    cur.execute("SELECT COALESCE(SUM(subtotal), 0) AS s FROM invoices")
+    invoiced = float(cur.fetchone()["s"])
+    cur.execute("SELECT COALESCE(SUM(amount), 0) AS s FROM ar.cash_receipts")
+    received_cash = float(cur.fetchone()["s"])
+    ar_expected = round(invoiced - received_cash, 2)
+    return expected_wip, case_expected, fg_expected, received_total, ar_expected
 
 
 def gl_trial_balance(company_id) -> dict:
@@ -2829,11 +2835,12 @@ def gl_trial_balance(company_id) -> dict:
     def control(name, ok, detail):
         return {"name": name, "ok": bool(ok), "detail": detail}
 
-    expected_wip, case_expected, fg_expected, received_total = expected
+    expected_wip, case_expected, fg_expected, received_total, ar_expected = expected
     wip_gl = gl_balance(balances, WIP_ACCOUNT)
     case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
     fg_gl = gl_balance(balances, FG_ACCOUNT)
     ap_gl = gl_balance(balances, AP_ACCOUNT)
+    ar_gl = gl_balance(balances, AR_ACCOUNT)
     grir_gl = gl_balance(balances, "2015")
     try:
         paid_total = proc_backed.payments_total() if proc_backed.enabled() else 0.0
@@ -2856,6 +2863,8 @@ def gl_trial_balance(company_id) -> dict:
         # GR-IR (received-not-invoiced) + AP (invoiced-unpaid) + payments made.
         # The old AP-only compare broke once receiving without an immediate
         # invoice (procurement UI receiving) and payments (AP module) existed.
+        control("Accounts Receivable ties to open invoices", abs(ar_gl - ar_expected) <= 0.01,
+                f"GL {ar_gl:,.2f} vs invoiced less cash received {ar_expected:,.2f}"),
         control("Received vendor POs tie to GR-IR + AP + payments",
                 abs((grir_gl + ap_gl + paid_total) - received_total) <= 0.01,
                 f"GR-IR {grir_gl:,.2f} + AP {ap_gl:,.2f} + paid {paid_total:,.2f}"
@@ -2988,6 +2997,7 @@ def set_costing_standard(payload: dict) -> dict:
 # Accounts the posting engine writes to by name; they can be renamed but not
 # deleted or restructured from the maintenance form.
 AR_ACCOUNT = "1200"
+CASH_ACCOUNT = "1000"
 SALES_ACCOUNT = "4000"
 COGS_ACCOUNT = "5010"
 AP_ACCOUNT = "2000"
@@ -3155,10 +3165,11 @@ def fetch_sales() -> dict:
                 """
                 SELECT i.invoice_no, so.so_no, c.name AS customer,
                        c.account_code AS customer_code, i.subtotal, i.cogs,
-                       i.invoiced_at
+                       i.invoiced_at, r.receipt_no AS paid_by_receipt
                 FROM invoices i
                 JOIN sales_orders so ON so.id = i.sales_order_id
                 JOIN customers c ON c.id = i.customer_id
+                LEFT JOIN ar.cash_receipts r ON r.invoice_id = i.id
                 ORDER BY i.id DESC
                 LIMIT 40
                 """
@@ -3166,8 +3177,59 @@ def fetch_sales() -> dict:
             invoices = cur.fetchall()
             for invoice in invoices:
                 invoice["margin"] = round(float(invoice["subtotal"]) - float(invoice["cogs"]), 2)
+            cur.execute(
+                """
+                SELECT r.receipt_no, i.invoice_no, c.name AS customer, r.amount,
+                       r.gl_event_ref, r.received_at
+                FROM ar.cash_receipts r
+                JOIN ar.invoices i ON i.id = r.invoice_id
+                JOIN ar.customers c ON c.id = r.customer_id
+                ORDER BY r.id DESC LIMIT 40
+                """
+            )
+            receipts = cur.fetchall()
     return {"customers": customers, "price_list": price_list, "stock": stock,
-            "orders": orders, "invoices": invoices}
+            "orders": orders, "invoices": invoices, "receipts": receipts}
+
+
+def record_cash_receipt(payload: dict) -> dict:
+    """AR module: receive payment of an invoice in full. Posts DR Cash (1000) /
+    CR Accounts Receivable (1200) to the shared GL and records the receipt —
+    the receipt row is the invoice's paid marker."""
+    invoice_no = str(payload.get("invoiceNo", "")).strip()
+    if not invoice_no:
+        raise ValueError("invoiceNo is required.")
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT i.id, i.invoice_no, i.customer_id, i.subtotal, c.name AS customer "
+                "FROM invoices i JOIN customers c ON c.id = i.customer_id WHERE i.invoice_no = %s",
+                (invoice_no,),
+            )
+            inv = cur.fetchone()
+            if not inv:
+                raise ValueError(f"Unknown invoice {invoice_no}.")
+            cur.execute("SELECT receipt_no FROM ar.cash_receipts WHERE invoice_id = %s", (inv["id"],))
+            existing = cur.fetchone()
+            if existing:
+                raise ValueError(f"{invoice_no} is already paid ({existing['receipt_no']}).")
+            cur.execute("SELECT COUNT(*) AS n FROM ar.cash_receipts")
+            receipt_no = f"RCT-{cur.fetchone()['n'] + 1}"
+            amount = round(float(inv["subtotal"]), 2)
+            post_cost_entry(
+                cur, receipt_no, None, invoice_no, "cash_receipt",
+                f"{receipt_no}: cash received for {invoice_no} from {inv['customer']}",
+                [(CASH_ACCOUNT, amount, 0), (AR_ACCOUNT, 0, amount)],
+            )
+            cur.execute(
+                "INSERT INTO ar.cash_receipts (receipt_no, invoice_id, customer_id, amount, "
+                "received_by, memo, gl_event_ref) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (receipt_no, inv["id"], inv["customer_id"], amount,
+                 str(payload.get("receivedBy", "")).strip(), str(payload.get("memo", "")).strip(),
+                 receipt_no),
+            )
+        conn.commit()
+    return {"receiptNo": receipt_no, "invoiceNo": invoice_no, "amount": amount, "status": "paid"}
 
 
 def manage_customer(payload: dict) -> dict:
@@ -5892,6 +5954,7 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             "/api/sales/customer",
             "/api/sales/order",
             "/api/sales/invoice",
+            "/api/sales/receipt",
             "/api/purchasing/vendor",
             "/api/purchasing/settings",
             "/api/purchasing/minmax",
@@ -5953,6 +6016,9 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/sales/invoice":
                 json_response(self, HTTPStatus.OK, ship_and_invoice(payload))
+                return
+            if path == "/api/sales/receipt":
+                json_response(self, HTTPStatus.OK, record_cash_receipt(payload))
                 return
             if path == "/api/purchasing/vendor":
                 result = manage_vendor(payload)

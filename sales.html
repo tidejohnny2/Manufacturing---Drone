@@ -143,10 +143,29 @@
               <th>Revenue</th>
               <th>COGS @ Std</th>
               <th>Gross Margin</th>
+              <th>Payment</th>
             </tr>
           </thead>
           <tbody id="invoicesBody">
-            <tr><td colspan="7">Invoices appear here after Ship &amp; Invoice.</td></tr>
+            <tr><td colspan="8">Invoices appear here after Ship &amp; Invoice.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="bom-table-wrap" aria-label="Cash receipts">
+        <table class="bom-table">
+          <thead>
+            <tr>
+              <th>Receipt</th>
+              <th>Invoice</th>
+              <th>Customer</th>
+              <th>Amount</th>
+              <th>GL Ref</th>
+              <th>Received (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="receiptsBody">
+            <tr><td colspan="6">Cash receipts appear here — receiving payment posts DR Cash / CR Accounts Receivable.</td></tr>
           </tbody>
         </table>
       </section>

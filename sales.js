@@ -4,6 +4,7 @@ const customersBody = document.querySelector("#customersBody");
 const customerMsg = document.querySelector("#customerMsg");
 const ordersBody = document.querySelector("#ordersBody");
 const invoicesBody = document.querySelector("#invoicesBody");
+const receiptsBody = document.querySelector("#receiptsBody");
 const orderMsg = document.querySelector("#orderMsg");
 const soCustomer = document.querySelector("#soCustomer");
 const soLines = document.querySelector("#soLines");
@@ -117,10 +118,52 @@ function renderSales(data) {
               <td>${money(inv.subtotal)}</td>
               <td>${money(inv.cogs)}</td>
               <td><strong>${money(inv.margin)}</strong></td>
+              <td>${
+                inv.paid_by_receipt
+                  ? `<span class="status-chip ok">Paid · ${esc(inv.paid_by_receipt)}</span>`
+                  : `<button class="mini-button" data-receipt-invoice="${esc(inv.invoice_no)}">Receive payment</button>`
+              }</td>
             </tr>`
         )
         .join("")
-    : '<tr><td colspan="7">Invoices appear here after Ship &amp; Invoice.</td></tr>';
+    : '<tr><td colspan="8">Invoices appear here after Ship &amp; Invoice.</td></tr>';
+
+  if (receiptsBody) {
+    receiptsBody.innerHTML = (data.receipts ?? []).length
+      ? data.receipts
+          .map(
+            (r) => `
+              <tr>
+                <td>${esc(r.receipt_no)}</td>
+                <td>${esc(r.invoice_no)}</td>
+                <td>${esc(r.customer)}</td>
+                <td>${money(r.amount)}</td>
+                <td>${esc(r.gl_event_ref ?? "")}</td>
+                <td>${new Date(r.received_at).toLocaleString()}</td>
+              </tr>`
+          )
+          .join("")
+      : '<tr><td colspan="6">Cash receipts appear here — receiving payment posts DR Cash / CR Accounts Receivable.</td></tr>';
+  }
+
+  invoicesBody.querySelectorAll("[data-receipt-invoice]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const response = await fetch("/api/sales/receipt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ invoiceNo: btn.dataset.receiptInvoice, receivedBy: "sales page" }),
+        });
+        const result = await response.json();
+        if (!response.ok || result.error) throw new Error(result.error ?? "Receipt failed.");
+        await getSales();
+      } catch (err) {
+        alert(err.message);
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 async function getSales() {
