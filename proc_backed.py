@@ -144,6 +144,13 @@ def received_po_total() -> float:
     return round(total, 2)
 
 
+def payments_total() -> float:
+    """Sum of AP payments made (the received-value tie nets these: received ==
+    GR-IR + AP + paid)."""
+    return round(sum(float(p.get("amount", 0))
+                     for p in proc_get("/v1/payments?company=1").get("payments", [])), 2)
+
+
 def fetch_po(po_no: str):
     """The service PO (with lines) — used by receiving to read the ordered lines."""
     for po in proc_get("/v1/purchase-orders?company=1").get("purchaseOrders", []):

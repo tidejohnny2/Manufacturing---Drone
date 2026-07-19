@@ -2834,6 +2834,11 @@ def gl_trial_balance(company_id) -> dict:
     case_gl = gl_balance(balances, SUBASSY_ACCOUNT)
     fg_gl = gl_balance(balances, FG_ACCOUNT)
     ap_gl = gl_balance(balances, AP_ACCOUNT)
+    grir_gl = gl_balance(balances, "2015")
+    try:
+        paid_total = proc_backed.payments_total() if proc_backed.enabled() else 0.0
+    except Exception:
+        paid_total = 0.0
     entries = generic.get("Every journal entry balances", {})
     immutable = generic.get("Ledger immutability enforced", {})
     controls = [
@@ -2847,8 +2852,14 @@ def gl_trial_balance(company_id) -> dict:
         control("Finished goods GL ties to FG stock at standard", abs(fg_gl - fg_expected) <= 1,
                 f"GL {fg_gl:,.2f} vs stock at standard {fg_expected:,.2f}"),
         control("Cost ledger immutability enforced", immutable.get("ok", False), immutable.get("detail", "")),
-        control("Accounts Payable ties to received vendor POs", abs(ap_gl - received_total) <= 0.01,
-                f"GL {ap_gl:,.2f} vs received PO total {received_total:,.2f}"),
+        # Received-value tie in the GR/IR + payments world: goods received =
+        # GR-IR (received-not-invoiced) + AP (invoiced-unpaid) + payments made.
+        # The old AP-only compare broke once receiving without an immediate
+        # invoice (procurement UI receiving) and payments (AP module) existed.
+        control("Received vendor POs tie to GR-IR + AP + payments",
+                abs((grir_gl + ap_gl + paid_total) - received_total) <= 0.01,
+                f"GR-IR {grir_gl:,.2f} + AP {ap_gl:,.2f} + paid {paid_total:,.2f}"
+                f" vs received PO total {received_total:,.2f}"),
     ]
     return {"accounts": balances, "total_debit": total_debit, "total_credit": total_credit,
             "controls": controls, "note": TB_NOTE}
