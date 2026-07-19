@@ -234,23 +234,24 @@ def set_settings(payload: dict) -> None:
 def push_receive(po_no, lines):
     """Receive a PO through the service (receipt + auto-invoice + 3-way match).
     Resumable/idempotent per PO (checks service PO status + a posted invoice) so
-    a retry after a partial failure completes it. RAISES on failure. Returns the
-    service receipt no when a receipt was posted on this call (the caller uses it
-    to fill bins exactly once); None if the PO was already received (bins were
-    filled on the first pass, so the caller skips)."""
+    a retry after a partial failure completes it. RAISES on failure. Since ERP
+    Phase D the SERVICE fills the shared INV module's bins in the receipt's own
+    transaction, so this app no longer fills anything locally. Returns the
+    service's receipt response (with binsFilled/repriced) when a receipt was
+    posted on this call; None if the PO was already received."""
     po = fetch_po(po_no)
     if po is None:
         raise RuntimeError(f"{po_no} is not on the procurement service")
-    receipt_no = None
+    receipt = None
     if po["status"] != "received":
-        receipt_no = proc_post("/v1/receipts?company=1", {"company": 1, "poNo": po_no}).get("receiptNo")
+        receipt = proc_post("/v1/receipts?company=1", {"company": 1, "poNo": po_no})
     already = any(i.get("purchase_order_id") == po["id"] and i.get("status") == "posted"
                   for i in proc_get("/v1/invoices?company=1").get("invoices", []))
     if not already:
         inv = proc_post("/v1/invoices?company=1",
                         {"company": 1, "vendorId": po["vendor_id"], "poNo": po_no, "lines": lines})
         proc_post("/v1/invoices/match?company=1", {"company": 1, "invoiceNo": inv["invoiceNo"]})
-    return receipt_no
+    return receipt
 
 
 def reset() -> None:
