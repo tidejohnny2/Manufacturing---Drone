@@ -224,21 +224,26 @@ def set_settings(payload: dict) -> None:
         "safetyStockDays": payload.get("safetyStockDays")})
 
 
-def push_receive(po_no, lines) -> None:
+def push_receive(po_no, lines):
     """Receive a PO through the service (receipt + auto-invoice + 3-way match).
     Resumable/idempotent per PO (checks service PO status + a posted invoice) so
-    a retry after a partial failure completes it. RAISES on failure."""
+    a retry after a partial failure completes it. RAISES on failure. Returns the
+    service receipt no when a receipt was posted on this call (the caller uses it
+    to fill bins exactly once); None if the PO was already received (bins were
+    filled on the first pass, so the caller skips)."""
     po = fetch_po(po_no)
     if po is None:
         raise RuntimeError(f"{po_no} is not on the procurement service")
+    receipt_no = None
     if po["status"] != "received":
-        proc_post("/v1/receipts?company=1", {"company": 1, "poNo": po_no})
+        receipt_no = proc_post("/v1/receipts?company=1", {"company": 1, "poNo": po_no}).get("receiptNo")
     already = any(i.get("purchase_order_id") == po["id"] and i.get("status") == "posted"
                   for i in proc_get("/v1/invoices?company=1").get("invoices", []))
     if not already:
         inv = proc_post("/v1/invoices?company=1",
                         {"company": 1, "vendorId": po["vendor_id"], "poNo": po_no, "lines": lines})
         proc_post("/v1/invoices/match?company=1", {"company": 1, "invoiceNo": inv["invoiceNo"]})
+    return receipt_no
 
 
 def reset() -> None:
