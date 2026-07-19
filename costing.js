@@ -1,6 +1,6 @@
 // Standard costing dashboard: cost cards, live WIP valuation, variance
 // report, and editable standards. The trial balance, cost journal, and
-// chart of accounts live on the Accounting page (accounting.js).
+// chart of accounts live in the shared GL app (ledger.onadapt.com).
 const costCards = document.querySelector("#costCards");
 const wipBody = document.querySelector("#wipBody");
 const wipTie = document.querySelector("#wipTie");
