@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -22,7 +23,9 @@ import proc_backed
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get("DATABASE_URL")
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
+# Shared secret for verifying the procurement receipt.posted webhook (HMAC-SHA256).
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 ACTIVE_STATUSES = ("planned", "released", "in_progress", "hold")
 DEFAULT_FINISHED_SKU = "DRN-FG-600"
 ORDER_PREFIXES = {"DRN-FG-600": "DRN-PO-", "CASE-FG-500": "CASE-PO-"}
@@ -3821,6 +3824,86 @@ def create_vendor_po(payload: dict) -> dict:
     return {"poNo": po_no, "vendor": vendor["name"], "lines": len(parsed), "total": total}
 
 
+def _fill_bins(cur, lines, reference):
+    """Fill inventory bins for received lines: add on-hand, log the inventory
+    transaction, and apply last-receipt-price to each part's booked actual cost
+    (audited). `reference` (the PO no) labels the transactions + audit rows.
+    Each line is {part_number, quantity, unit_price}. Returns the parts repriced."""
+    repriced = []
+    for line in lines:
+        part = line["part_number"]
+        quantity = line["quantity"]
+        price = float(line["unit_price"])
+        cur.execute(
+            "SELECT id, location_zone_id, unit FROM inventory_items WHERE part_number = %s ORDER BY id LIMIT 1",
+            (part,),
+        )
+        bin_row = cur.fetchone()
+        if not bin_row:
+            bin_row = _ensure_part_bin(cur, part, f"Bin created by receiving {reference}")
+        cur.execute(
+            "UPDATE inventory_items SET quantity_on_hand = quantity_on_hand + %s, updated_at = now() WHERE id = %s",
+            (quantity, bin_row["id"]),
+        )
+        cur.execute(
+            "INSERT INTO inventory_transactions "
+            "(inventory_item_id, transaction_type, to_zone_id, part_number, quantity, unit, reference) "
+            "VALUES (%s, 'create', %s, %s, %s, %s, %s)",
+            (bin_row["id"], bin_row["location_zone_id"], part, quantity, bin_row["unit"], reference),
+        )
+        cur.execute("SELECT actual_cost FROM standard_costs WHERE part_number = %s", (part,))
+        std = cur.fetchone()
+        if std and abs(float(std["actual_cost"]) - price) >= 0.005:
+            cur.execute(
+                "UPDATE standard_costs SET actual_cost = %s, updated_at = now() WHERE part_number = %s",
+                (price, part),
+            )
+            cur.execute(
+                "INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value) "
+                "VALUES (%s, 'material', %s, 'actual', %s, %s)",
+                (f"receiving {reference}", part, f"{float(std['actual_cost']):.2f}", f"{price:.2f}"),
+            )
+            repriced.append(part)
+    return repriced
+
+
+def fill_bins_once(cur, receipt_no, lines, reference):
+    """Idempotent bin-fill keyed on the service receipt no: the first caller for
+    a receipt fills bins; any echo or retry is a no-op. This is what lets a
+    receipt originate in EITHER Manufacturing or the procurement UI without
+    double-filling — the processed_receipts UNIQUE key is the mutex, so whichever
+    side inserts first fills and the other skips. `lines` = [{part_number,
+    quantity, unit_price}]."""
+    cur.execute(
+        "INSERT INTO processed_receipts (receipt_no, po_no) VALUES (%s, %s) "
+        "ON CONFLICT (receipt_no) DO NOTHING RETURNING receipt_no",
+        (receipt_no, reference),
+    )
+    if not cur.fetchone():
+        return {"receiptNo": receipt_no, "filled": False, "repriced": []}
+    repriced = _fill_bins(cur, lines, reference)
+    return {"receiptNo": receipt_no, "filled": True, "repriced": repriced}
+
+
+def apply_receipt_event(evt: dict) -> dict:
+    """Consume a procurement receipt.posted webhook — fill Manufacturing's bins
+    for the receipt (idempotent). Called for receipts that originate in the
+    procurement UI; an echo of Manufacturing's own receive is a no-op."""
+    if evt.get("event") != "receipt.posted":
+        return {"ignored": evt.get("event")}
+    receipt_no = str(evt.get("receiptNo") or "").strip()
+    if not receipt_no:
+        raise ValueError("receiptNo is required")
+    po_no = evt.get("poNo")
+    lines = [{"part_number": l["partNumber"], "quantity": int(l["quantity"]),
+              "unit_price": float(l.get("unitPrice") or 0)} for l in (evt.get("lines") or [])]
+    with psycopg.connect(require_database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            result = fill_bins_once(cur, receipt_no, lines, po_no or receipt_no)
+        conn.commit()
+    return {"event": "receipt.posted", **result}
+
+
 def receive_vendor_po(payload: dict) -> dict:
     """Receive an issued vendor PO in full: bins fill at the ordered
     quantities, the ledger posts DR Raw Materials / CR Accounts Payable at
@@ -3866,74 +3949,29 @@ def receive_vendor_po(payload: dict) -> dict:
             if not lines:
                 raise ValueError(f"{po_no} has no lines.")
 
-            repriced = []
-            for line in lines:
-                part = line["part_number"]
-                quantity = line["quantity"]
-                price = float(line["unit_price"])
-                cur.execute(
-                    """
-                    SELECT id, location_zone_id, unit FROM inventory_items
-                    WHERE part_number = %s ORDER BY id LIMIT 1
-                    """,
-                    (part,),
-                )
-                bin_row = cur.fetchone()
-                if not bin_row:
-                    # First receipt of a never-stocked part: create its bin at
-                    # the BOM source zone so the kit check can see the stock.
-                    bin_row = _ensure_part_bin(cur, part, f"Bin created by receiving {po_no}")
-                cur.execute(
-                    "UPDATE inventory_items SET quantity_on_hand = quantity_on_hand + %s, updated_at = now() WHERE id = %s",
-                    (quantity, bin_row["id"]),
-                )
-                cur.execute(
-                    """
-                    INSERT INTO inventory_transactions
-                      (inventory_item_id, transaction_type, to_zone_id, part_number, quantity, unit, reference)
-                    VALUES (%s, 'create', %s, %s, %s, %s, %s)
-                    """,
-                    (bin_row["id"], bin_row["location_zone_id"], part, quantity, bin_row["unit"], po_no),
-                )
-                # Last-receipt-price policy: the PO price becomes the booked
-                # actual cost, audited like any standards change.
-                cur.execute("SELECT actual_cost FROM standard_costs WHERE part_number = %s", (part,))
-                std = cur.fetchone()
-                if std and abs(float(std["actual_cost"]) - price) >= 0.005:
-                    cur.execute(
-                        "UPDATE standard_costs SET actual_cost = %s, updated_at = now() WHERE part_number = %s",
-                        (price, part),
-                    )
-                    cur.execute(
-                        """
-                        INSERT INTO standards_audit (actor, item_type, item_key, field, old_value, new_value)
-                        VALUES (%s, 'material', %s, 'actual', %s, %s)
-                        """,
-                        (f"receiving {po_no}", part, f"{float(std['actual_cost']):.2f}", f"{price:.2f}"),
-                    )
-                    repriced.append(part)
-
             total = round(sum(float(l["unit_price"]) * l["quantity"] for l in lines), 2)
             vendor_ref = f"{po['vendor_code']} {po['vendor']}" if po.get("vendor_code") else po["vendor"]
             if proc_backed.writes_enabled():
                 # Phase 4b: auto-invoice at receive. The service posts DR inventory /
-                # CR GR-IR then DR GR-IR / CR AP to the GL (net DR RM / CR AP) under
-                # the manufacturing tenant's books; the local RM/AP post is skipped
-                # (no double-post). Bins + reprice above stay local. Raises on
-                # failure -> the whole local receive rolls back for a clean retry.
-                proc_backed.push_receive(
+                # CR GR-IR then DR GR-IR / CR AP to the GL (net DR RM / CR AP) under the
+                # manufacturing tenant's books and emits receipt.posted; the local RM/AP
+                # post is skipped (no double-post). Bins fill via fill_bins_once keyed on
+                # the service receipt no, so the echoed webhook — and any retry — is a
+                # no-op (filled exactly once, whichever side gets there first). push_receive
+                # raises on failure -> the local receive rolls back for a clean retry.
+                receipt_no = proc_backed.push_receive(
                     po_no,
                     [{"partNumber": l["part_number"], "quantity": l["quantity"],
                       "unitPrice": float(l["unit_price"])} for l in lines],
                 )
+                repriced = fill_bins_once(cur, receipt_no, lines, po_no)["repriced"] if receipt_no else []
             else:
+                repriced = _fill_bins(cur, lines, po_no)
                 post_cost_entry(
                     cur, f"{po_no}-RCV", None, po_no, "po_receipt",
                     f"{po_no}: receive {len(lines)} line(s) from {vendor_ref} at PO prices",
                     [(RM_ACCOUNT, total, 0), (AP_ACCOUNT, 0, total)],
                 )
-            if not proc_backed.writes_enabled():
-                # Service-only: the service's receipt already marked its PO received.
                 cur.execute(
                     "UPDATE purchase_orders SET status = 'received', received_at = now() WHERE id = %s",
                     (po["id"],),
@@ -5803,8 +5841,29 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def _handle_receipt_webhook(self) -> None:
+        """Consume procurement's receipt.posted webhook: verify the HMAC-SHA256
+        signature over the raw body, then fill bins idempotently. Loopback-only
+        from the service (Caddy fronts everything else with basic_auth); the
+        signature is what proves the caller holds the shared secret."""
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        sig = self.headers.get("X-Onadapt-Signature", "")
+        expected = hmac.new(WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+        if not WEBHOOK_SECRET or not hmac.compare_digest(sig, expected):
+            json_response(self, HTTPStatus.UNAUTHORIZED, {"error": "invalid signature"})
+            return
+        try:
+            evt = json.loads(raw.decode("utf-8"))
+            json_response(self, HTTPStatus.OK, apply_receipt_event(evt))
+        except Exception as exc:  # noqa: BLE001 - report to the dispatcher for retry
+            json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/webhooks/receipt":
+            self._handle_receipt_webhook()
+            return
         if path not in (
             "/api/production-orders",
             "/api/reset-activity",

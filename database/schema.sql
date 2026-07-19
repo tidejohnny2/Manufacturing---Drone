@@ -1261,3 +1261,12 @@ DROP TABLE IF EXISTS purchase_orders CASCADE;
 DROP TABLE IF EXISTS vendor_price_breaks CASCADE;
 DROP TABLE IF EXISTS vendor_parts CASCADE;
 DROP TABLE IF EXISTS vendors CASCADE;
+
+-- Idempotency ledger for the procurement receipt.posted webhook (see
+-- migration 017): a receipt is bin-filled exactly once, keyed on the service
+-- receipt no, whichever side originated it.
+CREATE TABLE IF NOT EXISTS processed_receipts (
+  receipt_no   TEXT PRIMARY KEY,
+  po_no        TEXT,
+  processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
