@@ -5650,6 +5650,14 @@ class ManufacturingHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        # Always serve fresh: static assets (html/js/css) are otherwise cached
+        # heuristically off Last-Modified, which masks a deploy for returning
+        # visitors until the cache expires. no-store keeps the UI current and
+        # keeps dynamic API JSON from being cached too.
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self) -> None:
         parsed_url = urlparse(self.path)
         path = parsed_url.path
