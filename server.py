@@ -3609,6 +3609,7 @@ def fetch_purchasing() -> dict:
         "pos": pos,
         "ap_balance": ap_balance,
         "below_count": sum(1 for p in parts if p["below_reorder"]),
+        "audit": proc_backed.audit(1) if proc_backed.enabled() else {},
     }
 
 

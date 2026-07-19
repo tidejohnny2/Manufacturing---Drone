@@ -125,6 +125,16 @@ def settings() -> dict:
             "safety_stock_days": int(s["safety_stock_days"])}
 
 
+def audit(company: int = 1) -> dict:
+    """PO Audit package from the service — procure-to-pay controls + GR-IR/AP
+    tie-outs to the shared GL. Returns {} if procurement is unreachable so the
+    Purchasing page degrades gracefully rather than erroring."""
+    try:
+        return proc_get(f"/v1/audit?company={int(company)}")
+    except Exception:
+        return {}
+
+
 def received_po_total() -> float:
     """Sum of received-PO line values (the AP tie-out control's expected AP)."""
     total = 0.0

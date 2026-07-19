@@ -149,6 +149,35 @@ function renderPurchasing(data) {
         </tr>`
     )
     .join("");
+
+  renderPoAudit(data.audit || {});
+}
+
+function renderPoAudit(audit) {
+  const body = document.querySelector("#poAuditBody");
+  const verdict = document.querySelector("#poAuditVerdict");
+  const rows = audit.assertions || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5">PO Audit unavailable.</td></tr>';
+    verdict.textContent = "";
+    return;
+  }
+  const fails = rows.filter((a) => !a.pass).length;
+  verdict.innerHTML = fails
+    ? `<span class="var-unfav">ATTENTION — ${fails} exception${fails === 1 ? "" : "s"}</span>`
+    : `<span class="kit-chip kit-available">PASS &middot; ${rows.length} controls</span>`;
+  body.innerHTML = rows
+    .map((a) => `
+      <tr>
+        <td>${esc(a.id)}</td>
+        <td>${esc(a.check)}</td>
+        <td>${esc(a.expected)}</td>
+        <td>${esc(a.actual)}</td>
+        <td>${a.pass
+          ? '<span class="kit-chip kit-available">&#10003; Pass</span>'
+          : '<span class="kit-chip kit-short">&#10007; Fail</span>'}</td>
+      </tr>`)
+    .join("");
 }
 
 async function getPurchasing() {
